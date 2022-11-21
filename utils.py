@@ -91,12 +91,12 @@ def seed_everything(seed=42):
 
 def generate_examples(gen, steps, truncation=0.7, n=100,epoch=0,size=0,name="default"):
 
-    caminho = str(pathlib.Path().resolve()) + "\\imagens_geradas\\" + name
+    caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + name
     print(caminho) 
     if size < 10:
-        parent_dir = caminho + "\\size_0"+ str(size) +"\\"
+        parent_dir = caminho + "/size_0"+ str(size) +"/"
     else:
-        parent_dir = caminho + "\\size_"+ str(size) +"\\"
+        parent_dir = caminho + "/size_"+ str(size) +"/"
         
     if os.path.isdir(parent_dir) == False:
         pathlib.Path(parent_dir).mkdir(parents=True, exist_ok=True)
@@ -111,7 +111,7 @@ def generate_examples(gen, steps, truncation=0.7, n=100,epoch=0,size=0,name="def
         with torch.no_grad():
             noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
             img = gen(noise, alpha, steps)
-            save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}\\img_{i}.jpeg")
+            save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 
 
     gen.train()
