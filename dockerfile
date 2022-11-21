@@ -31,7 +31,19 @@ RUN pip install torch torchvision torchaudio
 
 RUN pip install scipy
 
+RUN pip install matplotlib
+
+RUN pip install tqdm
+
+RUN pip install scikit-learn
+
+RUN pip install opencv-python
+
+RUN pip install tensorboard
+
 RUN useradd -m docker && echo "docker:docker" | chpasswd && adduser docker sudo
+
+RUN usermod -aG sudo docker
 
 USER docker
 
