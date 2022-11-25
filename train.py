@@ -20,6 +20,7 @@ from math import log2
 from tqdm import tqdm
 import config
 
+
 torch.backends.cudnn.benchmarks = True
 
 
@@ -118,7 +119,7 @@ def train_fn(
     return tensorboard_step, alpha
 
 def main():
-    print(torch.__version__)
+    print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}")
     gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
     disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
 
@@ -134,14 +135,17 @@ def main():
     cur_epoch = 0
 
     if config.LOAD_MODEL:
-        cur_epoch,step = load_epoch_step()
+        #cur_epoch,step = load_epoch_step(dataset=config.DATASET) #Depreciada
+        epoch_s = [cur_epoch]
+        step_s = [step]
         load_checkpoint(
-            config.CHECKPOINT_GEN, gen, opt_gen, config.LEARNING_RATE_GENERATOR,
+            config.CHECKPOINT_GEN, gen, opt_gen, config.LEARNING_RATE_GENERATOR, epoch_s, step_s, config.DATASET
         )
         load_checkpoint(
-            config.CHECKPOINT_CRITIC, disc, opt_disc, config.LEARNING_RATE_DISCRIMINATOR,
+            config.CHECKPOINT_CRITIC, disc, opt_disc, config.LEARNING_RATE_DISCRIMINATOR, epoch_s, step_s, config.DATASET
         )
-
+    cur_epoch = epoch_s[0]
+    step = step_s[0]
     gen.train()
     disc.train()
     tensorboard_step = 0
@@ -151,8 +155,8 @@ def main():
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
-        print(f"Image size: {4*2**step}")
-
+        img_size = 4*2**step
+        print(f"Image size: {img_size}")
         for epoch in range(cur_epoch,num_epochs):
             print(f"Epoch [{epoch}/{num_epochs}]")
             tensorboard_step, alpha = train_fn(
@@ -173,12 +177,14 @@ def main():
                 generate_examples(gen,step,n=config.N_TO_GENERATE, epoch=(epoch-1), size=4*2**step,name=config.DATASET)
 
             if config.SAVE_MODEL:
-                save_epoch_step(epoch=epoch,step=step)
-                save_checkpoint(gen, opt_gen, filename=config.CHECKPOINT_GEN)
-                save_checkpoint(disc, opt_disc, filename=config.CHECKPOINT_CRITIC)
+                #save_epoch_step(epoch=epoch,step=step,dataset=config.DATASET)
+                save_checkpoint(gen, opt_gen, epoch, step, filename=config.CHECKPOINT_GEN, dataset=config.DATASET) #loss_disc loss_gen
+                save_checkpoint(disc, opt_disc, epoch, step, filename=config.CHECKPOINT_CRITIC, dataset=config.DATASET)
 
         step += 1
         cur_epoch = 0
+        torch.cuda.empty_cache()
+
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()

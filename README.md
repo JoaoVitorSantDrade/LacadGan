@@ -10,6 +10,16 @@ Implementação de Minibatch Descrimination - (FEITO - 20/07/22)
 
 Differentiable Augmentation - (FEITO - 26/09/2022)
 
+Correção do DifAugmentation - (FEITO - 20/10/2022)
+
+Criação do dockerfile e configuração - (FEITO - 21/11/2022)
+
+Adicionar verificação antes de tentar salvar/ler arquivo (Evitar jogar uma exception) - (FEITO - 21/11/2022)
+
+Salvar Epoch e Step em binário - (FEITO - 21/11/2022)
+
+Correção do UTILs.py - (FEITO - 23/11/2022)
+
  Perguntas:
 
  Como treinar uma GAN com dataset de tamanho limitado? - Feito
@@ -17,8 +27,6 @@ Differentiable Augmentation - (FEITO - 26/09/2022)
 
  To Do:
  
- Adicionar verificação antes de tentar salvar/ler arquivo (Evitar jogar uma exception)
- Salvar Epoch e Step em binário
  Implementação de Feature Matching
  Implementar Feature learning (Fazer a GAN diferenciar entre os tipos de imagem gerada)
  Implementação de Multi Scale Gradient - Paper
