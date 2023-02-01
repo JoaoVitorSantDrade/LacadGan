@@ -8,7 +8,7 @@ import config
 import pathlib
 from torchvision.utils import save_image
 from scipy.stats import truncnorm
-import git
+import matplotlib.pyplot as plt
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(
@@ -55,6 +55,7 @@ def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.p
         "optimizer": optimizer.state_dict(),
     }
     torch.save(checkpoint, caminho)
+    return 
 
 def load_checkpoint(checkpoint_file, model, optimizer, lr, epoch, step, dataset="default"):
 
@@ -70,7 +71,7 @@ def load_checkpoint(checkpoint_file, model, optimizer, lr, epoch, step, dataset=
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
     except Exception as exp:
-        print("=> No checkpoint found")
+        print(f"=> No checkpoint found in {checkpoint_file}")
 
 def save_epoch_step(epoch=0,step=0,dataset="default",filename="/epoch_step.txt"): #Depreciada
 
@@ -81,7 +82,7 @@ def save_epoch_step(epoch=0,step=0,dataset="default",filename="/epoch_step.txt")
         f.write('{}'.format(step))
         f.close()
     except FileNotFoundError:
-        print("=> Directory do not exist")
+        print(f"=> Directory {caminho} do not exist")
 
 def load_epoch_step(dataset="default", filename="/epoch_step.txt"): #Depreciada
     caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + filename
@@ -107,10 +108,8 @@ def seed_everything(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def generate_examples(gen, steps, truncation=0.7, n=100,epoch=0,size=0,name="default"):
-    repo = git.Repo( str(pathlib.Path().resolve()) )
-    print(repo.git.status())
-
+def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
+    truncation = 0.7
     caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + name
     if size < 10:
         parent_dir = caminho + "/size_0"+ str(size) +"/"
@@ -125,10 +124,15 @@ def generate_examples(gen, steps, truncation=0.7, n=100,epoch=0,size=0,name="def
     pathlib.Path(path).mkdir(parents=True, exist_ok=True)
     gen.eval()
     alpha = 1.0
+
+
     for i in range(n):
         with torch.no_grad():
+            
             noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
             img = gen(noise, alpha, steps)
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 
     gen.train()
+
+    return

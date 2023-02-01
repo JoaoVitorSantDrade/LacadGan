@@ -142,7 +142,7 @@ class Discriminator(nn.Module):
         return self.final_block(out).view(out.shape[0], -1)
 
 if __name__ == "__main__":
-    Z_DIM = 50
+    Z_DIM = 256
     IN_CHANNELS = 256
     gen = Generator(Z_DIM,IN_CHANNELS,img_channels=3)
     disc = Discriminator(IN_CHANNELS, img_channels=3)

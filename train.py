@@ -5,6 +5,8 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import diffAugmentation as DfAg
 from torch.utils.data import DataLoader
+from threading import Thread
+
 from torch.utils.tensorboard import SummaryWriter
 from utils import (
     gradient_penalty,
@@ -22,7 +24,9 @@ import config
 
 
 torch.backends.cudnn.benchmarks = True
-
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
 def get_loader(image_size):
     transform = transforms.Compose(
@@ -39,7 +43,7 @@ def get_loader(image_size):
         ]
     )
     batch_size = config.BATCH_SIZES[int(log2(image_size / 4))]
-    dataset = datasets.ImageFolder(root=config.DATASET, transform=transform)
+    dataset = datasets.ImageFolder(root=f"Datasets/{config.DATASET}", transform=transform)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -74,8 +78,11 @@ def train_fn(
 
         with torch.cuda.amp.autocast():
             fake = gen(noise, alpha, step)
-            fake = DfAg.DiffAugment(fake)
-            real = DfAg.DiffAugment(real)
+            
+            if config.DIFF_AUGMENTATION:
+                fake = DfAg.DiffAugment(fake)
+                real = DfAg.DiffAugment(real)
+
             disc_real = disc(real, alpha, step)
             disc_fake = disc(fake.detach(), alpha, step)
             gp = gradient_penalty(disc, real, fake, alpha, step, device=config.DEVICE)
@@ -120,12 +127,15 @@ def train_fn(
 
 def main():
     print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}")
+    
     gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
     disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
 
     #Initialize optmizer and scalers for FP16 Training
     opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99),capturable=True)
     opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99),capturable=True)
+    #opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99))
+    #opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99))
     scaler_disc = torch.cuda.amp.GradScaler()
     scaler_gen = torch.cuda.amp.GradScaler()
 
@@ -174,12 +184,21 @@ def main():
                 scaler_disc,
             )
             if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1):
-                generate_examples(gen,step,n=config.N_TO_GENERATE, epoch=(epoch-1), size=4*2**step,name=config.DATASET)
+                img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), config.DATASET,), daemon=True)
+                try:
+                    img_generator.start()
+                except Exception as err:
+                    print(f"Erro: {err}")
 
             if config.SAVE_MODEL:
-                #save_epoch_step(epoch=epoch,step=step,dataset=config.DATASET)
-                save_checkpoint(gen, opt_gen, epoch, step, filename=config.CHECKPOINT_GEN, dataset=config.DATASET) #loss_disc loss_gen
-                save_checkpoint(disc, opt_disc, epoch, step, filename=config.CHECKPOINT_CRITIC, dataset=config.DATASET)
+                #save_epoch_step(epoch=epoch,step=step,dataset=config.DATASET)                 #loss_disc loss_gen
+                gen_check = Thread(target=save_checkpoint, args=(gen, opt_gen, epoch, step, config.CHECKPOINT_GEN, config.DATASET,), daemon=True)
+                critic_check = Thread(target=save_checkpoint, args=(disc, opt_disc, epoch, step, config.CHECKPOINT_CRITIC, config.DATASET,), daemon=True)
+                try:
+                    gen_check.start()
+                    critic_check.start()
+                except Exception as err:
+                    print(f"Erro: {err}")
 
         step += 1
         cur_epoch = 0

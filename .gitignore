@@ -1,12 +1,9 @@
-saved_examples/
-saved_examples.zip
-celeba_hq/
-chest_xray
+imagens_geradas/
+Datasets/
 logs/gan
 logs\
 logs
 __pycache__
 epoch_step.txt
-glomerulo_normal/
 critic.pth
 generator.pth
