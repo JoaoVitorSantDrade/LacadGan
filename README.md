@@ -20,6 +20,8 @@ Salvar Epoch e Step em binário - (FEITO - 21/11/2022)
 
 Correção do UTILs.py - (FEITO - 23/11/2022)
 
+
+
  Perguntas:
 
  Como treinar uma GAN com dataset de tamanho limitado? - Feito
@@ -32,7 +34,7 @@ Correção do UTILs.py - (FEITO - 23/11/2022)
  Implementação de Multi Scale Gradient - Paper
  Adicionar Ruido nas imagens reais e sintéticas (Generator) para melhorar estabilidade das imagens geradas - Paper
  Implementação da ADAIN (Adapative Instance Normalization)
- Implementação do Restart Learning rate do descriminador - Paper
+ Implementação do Restart Learning rate do descriminador - Paper - Começo em 01/02/23
 
 
 https://www.casualganpapers.com/page/6/
