@@ -29,6 +29,7 @@ NUM_WORKERS = 0 #int(os.cpu_count()) Demora mto para carregar e o dataset n é g
 DIFF_AUGMENTATION = True
 RESTART_LEARNING = False
 OPTMIZER = "RMSPROP" # ADAM / NADAM / RMSPROP
+SCHEDULER = True
 
 # 30 Progressive Epochs
 # 256 Z_DIM e IN_CHANNELS

@@ -66,6 +66,8 @@ def train_fn(
     writer,
     scaler_gen,
     scaler_disc,
+    scheduler_gen,
+    scheduler_disc,
     ):
 
     loop = tqdm(loader, leave=True)
@@ -122,7 +124,12 @@ def train_fn(
                 tensorboard_step,
             )
             tensorboard_step += 1
-    print(f"Loss Critic: {loss_disc}")
+
+    if config.SCHEDULER:
+        scheduler_gen.step(loss_gen)
+        scheduler_disc.step(loss_disc)
+
+    print(f"Loss Critic: {loss_disc} <> Gradient Penalty: {gp}")
     return tensorboard_step, alpha
 
 def main():
@@ -135,13 +142,17 @@ def main():
     match config.OPTMIZER:
         case "RMSPROP":
             opt_gen = optim.RMSprop(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, weight_decay=config.WEIGHT_DECAY, foreach=True)
-            opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY, foreach=True)
+            opt_disc = optim.RMSprop(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY, foreach=True)
         case "ADAM":
             opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99),capturable=True)
             opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99),capturable=True)
         case "NADAM":
             opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99))
             opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99))
+
+    #Olhar mais a fundo
+    schedulerGen = optim.lr_scheduler.ReduceLROnPlateau(opt_gen, verbose=True)
+    schedulerDisc = optim.lr_scheduler.ReduceLROnPlateau(opt_disc, verbose=True)
 
     scaler_disc = torch.cuda.amp.GradScaler()
     scaler_gen = torch.cuda.amp.GradScaler()
@@ -192,6 +203,8 @@ def main():
                 writer,
                 scaler_gen,
                 scaler_disc,
+                schedulerGen,
+                schedulerDisc,
             )
             if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1):
                 img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), config.DATASET,), daemon=True)
