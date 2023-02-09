@@ -122,7 +122,7 @@ def train_fn(
                 tensorboard_step,
             )
             tensorboard_step += 1
-
+    print(f"Loss Critic: {loss_disc}")
     return tensorboard_step, alpha
 
 def main():
@@ -154,8 +154,11 @@ def main():
         load_checkpoint(
             config.CHECKPOINT_CRITIC, disc, opt_disc, config.LEARNING_RATE_DISCRIMINATOR, epoch_s, step_s, config.DATASET
         )
-    cur_epoch = epoch_s[0]
-    step = step_s[0]
+    
+    if not config.RESTART_LEARNING:
+        cur_epoch = epoch_s[0]
+        step = step_s[0]
+        
     gen.train()
     disc.train()
     tensorboard_step = 0
