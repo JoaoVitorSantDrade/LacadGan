@@ -23,6 +23,7 @@ def plot_to_tensorboard(
         writer.add_image("Real", img_grid_real, global_step=tensorboard_step)
         writer.add_image("Fake", img_grid_fake, global_step=tensorboard_step)
 
+
 def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
     BATCH_SIZE, C, H, W = real.shape
     beta = torch.rand((BATCH_SIZE, 1, 1, 1)).repeat(1, C, H, W).to(device)

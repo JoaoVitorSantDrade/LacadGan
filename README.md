@@ -20,8 +20,6 @@ Salvar Epoch e Step em binário - (FEITO - 21/11/2022)
 
 Correção do UTILs.py - (FEITO - 23/11/2022)
 
-
-
  Perguntas:
 
  Como treinar uma GAN com dataset de tamanho limitado? - Feito
