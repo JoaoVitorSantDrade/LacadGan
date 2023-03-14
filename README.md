@@ -35,5 +35,8 @@ Correção do UTILs.py - (FEITO - 23/11/2022)
  Implementação do Restart Learning rate do descriminador - Paper - Começo em 01/02/23
 
 
+Observações:
+Quanto maior o learning rate, maiores são as features que ele captura. Irei testar com um learning rate muito baixo e mais épocas, assim talvez ele consiga pegar as features menores das células
+
 https://www.casualganpapers.com/page/6/
 https://github.com/LACAD/gan-amiloisose.git

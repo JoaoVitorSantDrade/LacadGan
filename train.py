@@ -17,7 +17,7 @@ from utils import (
     generate_examples,
     save_epoch_step,
 )
-from model import Discriminator, Generator
+from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
 from tqdm import tqdm
 import config
@@ -135,8 +135,12 @@ def train_fn(
 def main():
     print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}")
     
-    gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
-    disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+    if config.STYLE:
+        gen = StyleGenerator(config.Z_DIM, config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+    else:
+        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
 
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:

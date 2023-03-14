@@ -135,5 +135,13 @@ def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 
     gen.train()
-
     return
+
+def show_loaded_model():
+    model = torch.load(str(pathlib.Path().resolve()) + "/imagens_geradas/" + config.DATASET +"/"+ config.CHECKPOINT_CRITIC)
+    print(model["state_dict"])
+
+
+
+if __name__ == "__main__":
+    show_loaded_model()
