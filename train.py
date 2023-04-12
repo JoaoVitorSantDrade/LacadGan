@@ -10,12 +10,10 @@ from threading import Thread
 from torch.utils.tensorboard import SummaryWriter
 from utils import (
     gradient_penalty,
-    load_epoch_step,
     plot_to_tensorboard,
     save_checkpoint,
     load_checkpoint,
     generate_examples,
-    save_epoch_step,
 )
 from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
@@ -33,13 +31,10 @@ def get_loader(image_size):
         [
             transforms.Resize((image_size,image_size)),
             transforms.ToTensor(),
-            transforms.RandomHorizontalFlip(p=0.2),
-            transforms.RandomVerticalFlip(p=0.2),
             transforms.Normalize(
-                [0.5 for _ in range(config.CHANNELS_IMG)],
-                [0.5 for _ in range(config.CHANNELS_IMG)],
+                [0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
+                [0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
             ),
-            transforms.ColorJitter(brightness=0.1, hue=0.1),
         ]
     )
     batch_size = config.BATCH_SIZES[int(log2(image_size / 4))]
@@ -49,7 +44,8 @@ def get_loader(image_size):
         batch_size=batch_size,
         shuffle=True,
         num_workers=config.NUM_WORKERS,
-        pin_memory=True,
+        pin_memory=False,
+        drop_last=True
     )
     return loader, dataset
 
@@ -129,7 +125,7 @@ def train_fn(
         scheduler_gen.step(loss_gen)
         scheduler_disc.step(loss_disc)
 
-    print(f"Loss Critic: {loss_disc} <> Gradient Penalty: {gp}")
+    print(f"Gradient Penalty: {gp.item()}")
     return tensorboard_step, alpha
 
 def main():
@@ -161,13 +157,12 @@ def main():
     scaler_disc = torch.cuda.amp.GradScaler()
     scaler_gen = torch.cuda.amp.GradScaler()
 
-    writer = SummaryWriter(f"logs/gan")
+    writer = SummaryWriter(f"logs/gan/{config.DATASET}")
 
     step = int(log2(config.START_TRAIN_AT_IMG_SIZE / 4))
     cur_epoch = 0
 
     if config.LOAD_MODEL:
-        #cur_epoch,step = load_epoch_step(dataset=config.DATASET) #Depreciada
         epoch_s = [cur_epoch]
         step_s = [step]
         load_checkpoint(
@@ -178,13 +173,12 @@ def main():
         )
     
     if not config.RESTART_LEARNING:
-        cur_epoch = epoch_s[0]
+        cur_epoch = epoch_s[0] #talvez somar
         step = step_s[0]
         
     gen.train()
     disc.train()
     tensorboard_step = 0
-    
     
 
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
@@ -214,6 +208,7 @@ def main():
                 img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), config.DATASET,), daemon=True)
                 try:
                     img_generator.start()
+                    img_generator.join()
                 except Exception as err:
                     print(f"Erro: {err}")
 
@@ -224,6 +219,8 @@ def main():
                 try:
                     gen_check.start()
                     critic_check.start()
+                    gen_check.join()
+                    critic_check.join()
                 except Exception as err:
                     print(f"Erro: {err}")
 

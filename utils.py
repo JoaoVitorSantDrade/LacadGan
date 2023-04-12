@@ -15,6 +15,8 @@ def plot_to_tensorboard(
     writer, loss_critic, loss_gen, real, fake, tensorboard_step
 ):
     writer.add_scalar("Loss Critic", loss_critic, global_step=tensorboard_step)
+    writer.add_scalar("Loss Generator", loss_gen, global_step=tensorboard_step)
+    writer.add_scalar("Loss Distance", abs(loss_gen) + abs(loss_gen), global_step=tensorboard_step)
 
     with torch.no_grad():
         # take out (up to) 8 examples to plot
@@ -48,7 +50,7 @@ def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
 
 def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
     caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + "/" + filename
-    print(f"=> Saving checkpoint in {filename}")
+    print(f"\n=> Saving checkpoint in {filename}\n")
     checkpoint = {
         "epoch": epoch,
         "step": step,
@@ -62,7 +64,7 @@ def load_checkpoint(checkpoint_file, model, optimizer, lr, epoch, step, dataset=
 
     caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + "/" + checkpoint_file
     try:
-        print(f"=> Loading checkpoint in {checkpoint_file}")
+        print(f"\n=> Loading checkpoint in {checkpoint_file}\n")
         checkpoint = torch.load(caminho, map_location="cuda")
         model.load_state_dict(checkpoint["state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -73,31 +75,6 @@ def load_checkpoint(checkpoint_file, model, optimizer, lr, epoch, step, dataset=
             param_group["lr"] = lr
     except Exception as exp:
         print(f"=> No checkpoint found in {checkpoint_file}")
-
-def save_epoch_step(epoch=0,step=0,dataset="default",filename="/epoch_step.txt"): #Depreciada
-
-    caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + filename
-    try:
-        f = open(caminho,'w')
-        f.write('{}\n'.format(epoch))
-        f.write('{}'.format(step))
-        f.close()
-    except FileNotFoundError:
-        print(f"=> Directory {caminho} do not exist")
-
-def load_epoch_step(dataset="default", filename="/epoch_step.txt"): #Depreciada
-    caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + filename
-    try:
-        f = open(caminho,'r')
-        epoch = int(f.readline())
-        step = int(f.readline())
-        return epoch,step
-    except FileNotFoundError:
-        print("=> No epoch/step checkpoint found")
-    except Exception as expt:
-        print(expt)
-    
-    return 0,0
 
 def seed_everything(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)

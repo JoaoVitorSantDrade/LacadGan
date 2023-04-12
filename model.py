@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from math import log2;
 
-factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
+factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
 
 class WSLinear(nn.Module):
     def __init__(
@@ -50,8 +50,7 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.conv1 = WSConv2d(in_channels, out_channels)
         self.conv2 = WSConv2d(out_channels, out_channels)
-        self.noise1 = injectNoise(in_channels)
-        self.leaky = nn.LeakyReLU(0.2)
+        self.leaky = nn.ELU(0.5)
         self.pn = PixelNorm()
         self.use_pn = use_pixelnorm
 
@@ -60,6 +59,7 @@ class ConvBlock(nn.Module):
         x = self.pn(x) if self.use_pn else x
         x = self.leaky(self.conv2(x))
         x = self.pn(x) if self.use_pn else x
+        x = self.leaky(self.conv2(x))
         return x
 
 class MappingNetwork(nn.Module):
@@ -94,12 +94,11 @@ class AdaIN(nn.Module):
         self.style_scale   = WSLinear(w_dim, channels)
         self.style_bias    = WSLinear(w_dim, channels)
 
-    def forward(self,x,w):
-        print(x)
+    def forward(self,x): # removi o w
         x = self.instance_norm(x)
-        style_scale = self.style_scale(w).unsqueeze(2).unsqueeze(3)
-        style_bias  = self.style_bias(w).unsqueeze(2).unsqueeze(3)
-        return style_scale * x + style_bias
+        #style_scale = self.style_scale(w).unsqueeze(2).unsqueeze(3)
+        #style_bias  = self.style_bias(w).unsqueeze(2).unsqueeze(3)
+        return x #style_scale * x + style_bias
 
 class injectNoise(nn.Module):
     def __init__(self, channels):
@@ -118,11 +117,10 @@ class GenBlock(nn.Module):
         self.leaky = nn.LeakyReLU(0.2, inplace=True)
         self.inject_noise1 = injectNoise(out_channel)
         self.inject_noise2 = injectNoise(out_channel)
-        self.adain1 = AdaIN(out_channel, w_dim)
-        self.adain2 = AdaIN(out_channel, w_dim)
-    def forward(self, x,w):
-        x = self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
-        x = self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
+        self.pn = PixelNorm()
+    def forward(self, x): #removi o w
+        x = self.leaky(self.inject_noise1(self.conv1(x))) #self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
+        x = self.pn(self.leaky(self.inject_noise2(self.conv2(x)))) #self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
         return x
 
 class StyleGenerator(nn.Module):
@@ -178,9 +176,9 @@ class Generator(nn.Module):
         self.initial = nn.Sequential(
             PixelNorm(),
             nn.ConvTranspose2d(z_dim, in_channels, 4, 1, 0), #1x1 -> 4x4
-            nn.LeakyReLU(0.2),
+            nn.ELU(0.2),
             WSConv2d(in_channels,in_channels,kernel_size=3,stride=1,padding=1),
-            nn.LeakyReLU(0.2),
+            nn.ELU(0.5),
             PixelNorm(),
         )
 
@@ -192,7 +190,7 @@ class Generator(nn.Module):
             # factors[i] -> factors[i+1]
             conv_in_c = int(in_channels * factors[i])
             conv_out_c = int(in_channels * factors[i+1])
-            self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c))
+            self.prog_blocks.append(GenBlock(conv_in_c,conv_out_c,z_dim))
             self.rgb_layers.append(WSConv2d(conv_out_c,img_channels, kernel_size=1,stride=1, padding=0))
             
 
@@ -212,7 +210,6 @@ class Generator(nn.Module):
         final_upscaled = self.rgb_layers[steps-1](upscaled)
         final_out = self.rgb_layers[steps](out)
         return self.fade_in(alpha, final_upscaled, final_out)
-
 
 class Discriminator(nn.Module):
     def __init__(self,in_channels, img_channels=3):
@@ -351,11 +348,34 @@ class StyleDiscriminator(nn.Module):
         out = self.minibatch_std(out)
         return self.final_block(out).view(out.shape[0], -1)
 
+class BiLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes):
+        super(BiLSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.fc = nn.Linear(2 * hidden_size, num_classes)
+    
+    def forward(self, x):
+        h0 = torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
+        c0 = torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
+        out, (hn, cn) = self.lstm(x, (h0, c0))
+        out = self.fc(torch.cat((out[-2,:,:], out[-1,:,:]), dim=1))
+        return out
+
 if __name__ == "__main__":
-    Z_DIM = 256
-    IN_CHANNELS = 256
+    Z_DIM = 512
+    IN_CHANNELS = 512
     gen = Generator(Z_DIM,IN_CHANNELS,img_channels=3)
     disc = Discriminator(IN_CHANNELS, img_channels=3)
+
+    gen_size = sum(p.numel() for p in gen.parameters() if p.requires_grad)
+    print(gen_size)
+
+    disc_size = sum(p.numel() for p in disc.parameters() if p.requires_grad)
+    print(
+        disc_size
+    )
 
     for img_size in [4, 8, 16, 32, 64, 128, 256, 512, 1024]:
         num_steps = int(log2(img_size / 4))
