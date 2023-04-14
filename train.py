@@ -6,6 +6,8 @@ import torchvision.transforms as transforms
 import diffAugmentation as DfAg
 from torch.utils.data import DataLoader
 from threading import Thread
+from wakepy import keepawake
+from datetime import datetime
 
 from torch.utils.tensorboard import SummaryWriter
 from utils import (
@@ -25,6 +27,7 @@ torch.backends.cudnn.benchmarks = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+torch.set_float32_matmul_precision('medium')
 
 def get_loader(image_size):
     transform = transforms.Compose(
@@ -42,10 +45,10 @@ def get_loader(image_size):
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=config.NUM_WORKERS,
-        pin_memory=False,
-        drop_last=True
+        pin_memory=True,
+        drop_last=True,
     )
     return loader, dataset
 
@@ -64,8 +67,9 @@ def train_fn(
     scaler_disc,
     scheduler_gen,
     scheduler_disc,
+    now,
     ):
-
+    
     loop = tqdm(loader, leave=True)
     for batch_idx, (real, _) in enumerate(loop):
         real = real.to(config.DEVICE)
@@ -92,6 +96,10 @@ def train_fn(
 
         opt_disc.zero_grad()
         scaler_disc.scale(loss_disc).backward()
+
+        scaler_disc.unscale_(opt_disc)
+        torch.nn.utils.clip_grad_norm_(disc.parameters(), 0.01)
+
         scaler_disc.step(opt_disc)
         scaler_disc.update()
 
@@ -102,23 +110,33 @@ def train_fn(
 
         opt_gen.zero_grad()
         scaler_gen.scale(loss_gen).backward()
+
+        scaler_gen.unscale_(opt_gen)
+        torch.nn.utils.clip_grad_norm_(gen.parameters(), 0.01)
+
         scaler_gen.step(opt_gen)
         scaler_gen.update()
 
         alpha += cur_batch_size / (len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.5)
         alpha = min(alpha, 1)
 
+        
+
         if batch_idx % 500 == 0:
             with torch.no_grad():
                 fixed_fakes = gen(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
-            plot_to_tensorboard(
-                writer,
-                loss_disc.item(),
-                loss_gen.item(),
-                real.detach(),
-                fixed_fakes.detach(),
-                tensorboard_step,
-            )
+                plot_to_tensorboard(
+                    writer,
+                    loss_disc.item(),
+                    loss_gen.item(),
+                    gp,
+                    real.detach(),
+                    fixed_fakes.detach(),
+                    DfAg.DiffAugment(real),
+                    DfAg.DiffAugment(fixed_fakes),
+                    tensorboard_step,
+                    now,
+                )
             tensorboard_step += 1
 
     if config.SCHEDULER:
@@ -130,7 +148,7 @@ def train_fn(
 
 def main():
     print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}")
-    
+    now = datetime.now()
     if config.STYLE:
         gen = StyleGenerator(config.Z_DIM, config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
         disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
@@ -144,24 +162,45 @@ def main():
             opt_gen = optim.RMSprop(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, weight_decay=config.WEIGHT_DECAY, foreach=True)
             opt_disc = optim.RMSprop(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY, foreach=True)
         case "ADAM":
-            opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99),capturable=True)
-            opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99),capturable=True)
+            opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99),weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99),weight_decay=config.WEIGHT_DECAY)
         case "NADAM":
-            opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99))
-            opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99))
+            opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99), weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99), weight_decay=config.WEIGHT_DECAY)
+        case "ADAMAX":
+            opt_gen = optim.Adamax(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99), weight_decay=config.WEIGHT_DECAY, maximize=False)
+            opt_disc = optim.Adamax(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99), weight_decay=config.WEIGHT_DECAY, maximize=False)
+        case "ADAMW":
+            opt_gen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.0,0.99), weight_decay=config.WEIGHT_DECAY, maximize=False)
+            opt_disc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.0,0.99), weight_decay=config.WEIGHT_DECAY, maximize=False)
+
 
     #Olhar mais a fundo
-    schedulerGen = optim.lr_scheduler.ReduceLROnPlateau(opt_gen, verbose=True)
-    schedulerDisc = optim.lr_scheduler.ReduceLROnPlateau(opt_disc, verbose=True)
+    schedulerGen = optim.lr_scheduler.ReduceLROnPlateau(
+        opt_gen,
+        patience=config.PATIENCE_DECAY,
+        factor=0.4,
+        min_lr=config.MIN_LEARNING_RATE, 
+        verbose=True
+        )
+    schedulerDisc = optim.lr_scheduler.ReduceLROnPlateau(
+        opt_disc,
+        patience=config.PATIENCE_DECAY,
+        factor=0.4,
+        min_lr=config.MIN_LEARNING_RATE,
+        verbose=True
+        )
 
     scaler_disc = torch.cuda.amp.GradScaler()
     scaler_gen = torch.cuda.amp.GradScaler()
 
-    writer = SummaryWriter(f"logs/gan/{config.DATASET}")
+    writer = SummaryWriter(f"logs/LacadGan/{config.DATASET}/{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}")
+    
+
 
     step = int(log2(config.START_TRAIN_AT_IMG_SIZE / 4))
     cur_epoch = 0
-
+    
     if config.LOAD_MODEL:
         epoch_s = [cur_epoch]
         step_s = [step]
@@ -172,20 +211,24 @@ def main():
             config.CHECKPOINT_CRITIC, disc, opt_disc, config.LEARNING_RATE_DISCRIMINATOR, epoch_s, step_s, config.DATASET
         )
     
-    if not config.RESTART_LEARNING:
-        cur_epoch = epoch_s[0] #talvez somar
-        step = step_s[0]
-        
+    writerGen = SummaryWriter(f"logs/LacadGan/{2**config.SIMULATED_STEP * 4}x{2**config.SIMULATED_STEP * 4}_gen")
+    writerCritc = SummaryWriter(f"logs/LacadGan/{2**config.SIMULATED_STEP * 4}x{2**config.SIMULATED_STEP * 4}_critic")
+    with torch.no_grad():
+        writerGen.add_graph(gen,config.FIXED_NOISE,verbose = False)
+        writerCritc.add_graph(disc,gen(config.FIXED_NOISE,0.5,config.SIMULATED_STEP),verbose = False)
+    writerGen.close()
+    writerCritc.close()
+
     gen.train()
     disc.train()
     tensorboard_step = 0
-    
-
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
         img_size = 4*2**step
         print(f"Image size: {img_size}")
+        
+
         for epoch in range(cur_epoch,num_epochs):
             print(f"Epoch [{epoch}/{num_epochs}]")
             tensorboard_step, alpha = train_fn(
@@ -203,9 +246,13 @@ def main():
                 scaler_disc,
                 schedulerGen,
                 schedulerDisc,
+                now,
             )
-            if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1):
-                img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), config.DATASET,), daemon=True)
+        
+            data_save_path = config.DATASET + "_"+ now.strftime("%d_%m_%Hh_%Mm")
+
+            if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1) and config.GENERATE_IMAGES:
+                img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), data_save_path,), daemon=True)
                 try:
                     img_generator.start()
                     img_generator.join()
@@ -214,8 +261,8 @@ def main():
 
             if config.SAVE_MODEL:
                 #save_epoch_step(epoch=epoch,step=step,dataset=config.DATASET)                 #loss_disc loss_gen
-                gen_check = Thread(target=save_checkpoint, args=(gen, opt_gen, epoch, step, config.CHECKPOINT_GEN, config.DATASET,), daemon=True)
-                critic_check = Thread(target=save_checkpoint, args=(disc, opt_disc, epoch, step, config.CHECKPOINT_CRITIC, config.DATASET,), daemon=True)
+                gen_check = Thread(target=save_checkpoint, args=(gen, opt_gen, epoch, step, config.CHECKPOINT_GEN, data_save_path,), daemon=True)
+                critic_check = Thread(target=save_checkpoint, args=(disc, opt_disc, epoch, step, config.CHECKPOINT_CRITIC, data_save_path,), daemon=True)
                 try:
                     gen_check.start()
                     critic_check.start()
@@ -223,12 +270,15 @@ def main():
                     critic_check.join()
                 except Exception as err:
                     print(f"Erro: {err}")
+            torch.cuda.empty_cache()
 
         step += 1
         cur_epoch = 0
-        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()
-    main()
+    with keepawake(keep_screen_awake=False):
+        main()
+
+    #python -m wakepy

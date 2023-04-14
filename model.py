@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import log2;
+import config
 
 factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
 
@@ -50,16 +51,18 @@ class ConvBlock(nn.Module):
         super().__init__()
         self.conv1 = WSConv2d(in_channels, out_channels)
         self.conv2 = WSConv2d(out_channels, out_channels)
-        self.leaky = nn.ELU(0.5)
+        self.conv3 = WSConv2d(out_channels, out_channels)
+        self.noise = injectNoise(out_channels)
+        self.leaky = nn.GELU()
         self.pn = PixelNorm()
         self.use_pn = use_pixelnorm
 
     def forward(self, x):
         x = self.leaky(self.conv1(x))
         x = self.pn(x) if self.use_pn else x
-        x = self.leaky(self.conv2(x))
+        x = self.leaky(self.conv2(self.noise(x)))
         x = self.pn(x) if self.use_pn else x
-        x = self.leaky(self.conv2(x))
+        x = self.leaky(self.conv3(x))
         return x
 
 class MappingNetwork(nn.Module):
@@ -117,10 +120,11 @@ class GenBlock(nn.Module):
         self.leaky = nn.LeakyReLU(0.2, inplace=True)
         self.inject_noise1 = injectNoise(out_channel)
         self.inject_noise2 = injectNoise(out_channel)
-        self.pn = PixelNorm()
+        self.adain1 = AdaIN(out_channel, w_dim)
+        self.adain2 = AdaIN(out_channel, w_dim)
     def forward(self, x): #removi o w
-        x = self.leaky(self.inject_noise1(self.conv1(x))) #self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
-        x = self.pn(self.leaky(self.inject_noise2(self.conv2(x)))) #self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
+        x = self.adain1(self.leaky(self.inject_noise1(self.conv1(x)))) #self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
+        x = self.adain2(self.leaky(self.inject_noise2(self.conv2(x)))) #self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
         return x
 
 class StyleGenerator(nn.Module):
@@ -176,9 +180,9 @@ class Generator(nn.Module):
         self.initial = nn.Sequential(
             PixelNorm(),
             nn.ConvTranspose2d(z_dim, in_channels, 4, 1, 0), #1x1 -> 4x4
-            nn.ELU(0.2),
+            nn.ELU(),
             WSConv2d(in_channels,in_channels,kernel_size=3,stride=1,padding=1),
-            nn.ELU(0.5),
+            nn.ELU(),
             PixelNorm(),
         )
 
@@ -190,14 +194,14 @@ class Generator(nn.Module):
             # factors[i] -> factors[i+1]
             conv_in_c = int(in_channels * factors[i])
             conv_out_c = int(in_channels * factors[i+1])
-            self.prog_blocks.append(GenBlock(conv_in_c,conv_out_c,z_dim))
+            self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c))
             self.rgb_layers.append(WSConv2d(conv_out_c,img_channels, kernel_size=1,stride=1, padding=0))
             
 
     def fade_in(self, alpha, upscaled, generated):
         return torch.tanh(alpha * generated + (1 - alpha) * upscaled)
 
-    def forward(self, x, alpha, steps): #steps=0 (4x4), steps=1 (8x8), ...
+    def forward(self, x, alpha = 1, steps = config.SIMULATED_STEP): #steps=0 (4x4), steps=1 (8x8), ...
         out = self.initial(x) # 4x4
 
         if steps == 0:
@@ -245,7 +249,7 @@ class Discriminator(nn.Module):
         batch_statistics = torch.std(x, dim=0).mean().repeat(x.shape[0], 1 , x.shape[2], x.shape[3]) # N x Channels x Height x Width -> N
         return torch.cat([x, batch_statistics], dim=1) # 512 -> 513
 
-    def forward(self,x, alpha, steps): # steps=0 (4x4), steps=1 (8x8), ...
+    def forward(self,x, alpha = 1, steps = config.SIMULATED_STEP): # steps=0 (4x4), steps=1 (8x8), ...
         cur_step = len(self.prog_blocks) - steps
         out = self.leaky(self.rgb_layers[cur_step](x))
 
@@ -364,8 +368,8 @@ class BiLSTM(nn.Module):
         return out
 
 if __name__ == "__main__":
-    Z_DIM = 512
-    IN_CHANNELS = 512
+    Z_DIM = 32
+    IN_CHANNELS = 32
     gen = Generator(Z_DIM,IN_CHANNELS,img_channels=3)
     disc = Discriminator(IN_CHANNELS, img_channels=3)
 

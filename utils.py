@@ -3,28 +3,34 @@ import random
 import numpy as np
 import os
 import torchvision
-import torch.nn as nn
 import config
 import pathlib
 from torchvision.utils import save_image
 from scipy.stats import truncnorm
-import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
+
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(
-    writer, loss_critic, loss_gen, real, fake, tensorboard_step
+    writer:SummaryWriter, loss_critic, loss_gen, gp, real, fake, realDF, fakeDF, tensorboard_step, now:datetime
 ):
-    writer.add_scalar("Loss Critic", loss_critic, global_step=tensorboard_step)
-    writer.add_scalar("Loss Generator", loss_gen, global_step=tensorboard_step)
-    writer.add_scalar("Loss Distance", abs(loss_gen) + abs(loss_gen), global_step=tensorboard_step)
+    writer.add_scalar("loss/critic", loss_critic,global_step=tensorboard_step,new_style=True)
+    writer.add_scalar("loss/gen", loss_gen,global_step=tensorboard_step,new_style=True)
+    writer.add_scalar("loss/distance", abs(loss_gen) + abs(loss_gen),global_step=tensorboard_step,new_style=True)
 
+    writer.add_scalar("GradientPenalty/", gp, global_step=tensorboard_step, new_style=True)
+    
     with torch.no_grad():
-        # take out (up to) 8 examples to plot
-        img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
-        img_grid_fake = torchvision.utils.make_grid(fake[:8], normalize=True)
-        writer.add_image("Real", img_grid_real, global_step=tensorboard_step)
-        writer.add_image("Fake", img_grid_fake, global_step=tensorboard_step)
-
+        img_grid_real = torchvision.utils.make_grid(real, normalize=True)
+        img_grid_fake = torchvision.utils.make_grid(fake, normalize=True)
+        writer.add_image(f'Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_real, global_step=tensorboard_step)
+        writer.add_image(f'Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fake, global_step=tensorboard_step)
+        if config.DIFF_AUGMENTATION:
+            img_grid_realDF = torchvision.utils.make_grid(realDF[:8], normalize=True)
+            img_grid_fakeDF = torchvision.utils.make_grid(fakeDF[:8], normalize=True)
+            writer.add_image(f'Diff_Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fakeDF, global_step=tensorboard_step)
+            writer.add_image(f'Diff_Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_realDF, global_step=tensorboard_step)
 
 def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
     BATCH_SIZE, C, H, W = real.shape
@@ -49,7 +55,7 @@ def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
     return gradient_penalty
 
 def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
-    caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + "/" + filename
+    caminho = str(pathlib.Path().resolve()) + "/saves/" + dataset + "/" + filename
     print(f"\n=> Saving checkpoint in {filename}\n")
     checkpoint = {
         "epoch": epoch,
@@ -57,12 +63,17 @@ def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.p
         "state_dict": model.state_dict(),
         "optimizer": optimizer.state_dict(),
     }
-    torch.save(checkpoint, caminho)
+    try:
+        torch.save(checkpoint, caminho)
+    except:
+        pathlib.Path(str(pathlib.Path().resolve()) + "/saves/" + dataset + "/").mkdir(parents=True, exist_ok=True)
+        torch.save(checkpoint, caminho)
+
     return 
 
 def load_checkpoint(checkpoint_file, model, optimizer, lr, epoch, step, dataset="default"):
 
-    caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + dataset + "/" + checkpoint_file
+    caminho = str(pathlib.Path().resolve()) + "/saves/" + dataset + "/" + checkpoint_file
     try:
         print(f"\n=> Loading checkpoint in {checkpoint_file}\n")
         checkpoint = torch.load(caminho, map_location="cuda")
@@ -88,7 +99,7 @@ def seed_everything(seed=42):
 
 def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
     truncation = 0.7
-    caminho = str(pathlib.Path().resolve()) + "/imagens_geradas/" + name
+    caminho = str(pathlib.Path().resolve()) + "/saves/" + name
     if size < 10:
         parent_dir = caminho + "/size_0"+ str(size) +"/"
     else:
@@ -115,10 +126,5 @@ def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
     return
 
 def show_loaded_model():
-    model = torch.load(str(pathlib.Path().resolve()) + "/imagens_geradas/" + config.DATASET +"/"+ config.CHECKPOINT_CRITIC)
+    model = torch.load(str(pathlib.Path().resolve()) + "/saves/" + config.DATASET +"/"+ config.CHECKPOINT_CRITIC)
     print(model["state_dict"])
-
-
-
-if __name__ == "__main__":
-    show_loaded_model()
