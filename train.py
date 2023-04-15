@@ -284,7 +284,7 @@ if __name__ == "__main__":
         tb = program.TensorBoard()
         tb.configure(argv=[None, '--logdir', path])
         url = tb.launch()
-        print(f"\n\nTensorflow rodando em {url}")
+        print(f"\n\nTensorboard rodando em {url}")
         main()
 
     #python -m wakepy
