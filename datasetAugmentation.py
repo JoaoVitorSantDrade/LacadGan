@@ -16,7 +16,7 @@ torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 torch.set_float32_matmul_precision('medium')
 
 batchsize = 16
-full_path = str(pathlib.Path().resolve()) + f"/Datasets/{config.DATASET}-aug/"
+full_path = str(pathlib.Path().resolve()) + f"/Datasets/{config.DATASET}_aug/"
 
 transform = transforms.Compose(
     [

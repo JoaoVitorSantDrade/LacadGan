@@ -9,6 +9,7 @@ from torchvision.utils import save_image
 from scipy.stats import truncnorm
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
+from model import Discriminator, Generator
 
 
 # Print losses occasionally and print to tensorboard
@@ -22,8 +23,8 @@ def plot_to_tensorboard(
     writer.add_scalar("GradientPenalty/", gp, global_step=tensorboard_step, new_style=True)
     
     with torch.no_grad():
-        img_grid_real = torchvision.utils.make_grid(real, normalize=True)
-        img_grid_fake = torchvision.utils.make_grid(fake, normalize=True)
+        img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
+        img_grid_fake = torchvision.utils.make_grid(fake[:8], normalize=True)
         writer.add_image(f'Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_real, global_step=tensorboard_step)
         writer.add_image(f'Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fake, global_step=tensorboard_step)
         if config.DIFF_AUGMENTATION:
@@ -32,14 +33,36 @@ def plot_to_tensorboard(
             writer.add_image(f'Diff_Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fakeDF, global_step=tensorboard_step)
             writer.add_image(f'Diff_Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_realDF, global_step=tensorboard_step)
 
-def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
+
+def plot_cnns_tensorboard():
+
+    for step in range(config.SIMULATED_STEP):
+        writerGen = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_gen")
+        writerCritc = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_critic") 
+        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        gen.set_alpha(0.5)
+        gen.set_step(step+1)
+        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        disc.set_alpha(0.5)
+        disc.set_step(step+1)
+        with torch.no_grad():
+            writerGen.add_graph(gen,config.FIXED_NOISE,verbose = False, use_strict_trace=False)
+            writerCritc.add_graph(disc,gen(config.FIXED_NOISE),verbose = False, use_strict_trace=False)
+        del gen
+        del disc
+        writerGen.close()
+        writerCritc.close()
+        
+
+
+def gradient_penalty(critic, real, fake, device="cpu"):
     BATCH_SIZE, C, H, W = real.shape
     beta = torch.rand((BATCH_SIZE, 1, 1, 1)).repeat(1, C, H, W).to(device)
     interpolated_images = real * beta + fake.detach() * (1 - beta)
     interpolated_images.requires_grad_(True)
 
     # Calculate critic scores
-    mixed_scores = critic(interpolated_images, alpha, train_step)
+    mixed_scores = critic(interpolated_images)
 
     # Take the gradient of the scores with respect to the images
     gradient = torch.autograd.grad(
@@ -49,9 +72,9 @@ def gradient_penalty(critic, real, fake, alpha, train_step, device="cpu"):
         create_graph=True,
         retain_graph=True,
     )[0]
-    gradient = gradient.reshape(gradient.shape[0], -1) # Troquei para reshape | era view
+    gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
     gradient_norm = gradient.norm(2, dim=1)
-    gradient_penalty = torch.mean((gradient_norm - 1) ** 2)
+    gradient_penalty = torch.mean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
     return gradient_penalty
 
 def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
@@ -128,3 +151,6 @@ def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
 def show_loaded_model():
     model = torch.load(str(pathlib.Path().resolve()) + "/saves/" + config.DATASET +"/"+ config.CHECKPOINT_CRITIC)
     print(model["state_dict"])
+
+if __name__ == "__main__":
+    plot_cnns_tensorboard()

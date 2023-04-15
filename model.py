@@ -185,7 +185,9 @@ class Generator(nn.Module):
             nn.ELU(),
             PixelNorm(),
         )
-
+        self.step = 0
+        self.alpha = 0
+        
         self.initial_rgb = WSConv2d(in_channels, img_channels, kernel_size=1,stride=1, padding=0)
 
         self.prog_blocks, self.rgb_layers = nn.ModuleList(), nn.ModuleList([self.initial_rgb])
@@ -197,23 +199,28 @@ class Generator(nn.Module):
             self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c))
             self.rgb_layers.append(WSConv2d(conv_out_c,img_channels, kernel_size=1,stride=1, padding=0))
             
+    def set_step(self, step):
+        self.step = step
 
-    def fade_in(self, alpha, upscaled, generated):
-        return torch.tanh(alpha * generated + (1 - alpha) * upscaled)
+    def set_alpha(self, alpha):
+        self.alpha = alpha
 
-    def forward(self, x, alpha = 1, steps = config.SIMULATED_STEP): #steps=0 (4x4), steps=1 (8x8), ...
+    def fade_in(self, upscaled, generated):
+        return torch.tanh(self.alpha * generated + (1 - self.alpha) * upscaled)
+
+    def forward(self, x): #steps=0 (4x4), steps=1 (8x8), ...
         out = self.initial(x) # 4x4
 
-        if steps == 0:
+        if self.step == 0:
             return self.initial_rgb(out)
 
-        for step in range(steps):
+        for step in range(self.step):
             upscaled = F.interpolate(out, scale_factor=2, mode="nearest")
             out = self.prog_blocks[step](upscaled)
 
-        final_upscaled = self.rgb_layers[steps-1](upscaled)
-        final_out = self.rgb_layers[steps](out)
-        return self.fade_in(alpha, final_upscaled, final_out)
+        final_upscaled = self.rgb_layers[self.step-1](upscaled)
+        final_out = self.rgb_layers[self.step](out)
+        return self.fade_in(final_upscaled, final_out)
 
 class Discriminator(nn.Module):
     def __init__(self,in_channels, img_channels=3):
@@ -221,6 +228,9 @@ class Discriminator(nn.Module):
         self.prog_blocks, self.rgb_layers = nn.ModuleList(), nn.ModuleList()
         self.leaky = nn.LeakyReLU(0.2)
          
+        self.step = 0
+        self.alpha = 0
+
         for i in range(len(factors) - 1,0,-1):
             conv_in_c = int(in_channels * factors[i])
             conv_out_c = int(in_channels * factors[i-1])
@@ -241,25 +251,29 @@ class Discriminator(nn.Module):
             WSConv2d(in_channels, 1, kernel_size=1,stride=1, padding=0), # Linear
 
         )
-
-    def fade_in(self, alpha, downscaled, out):
-        return alpha * out + (1 - alpha) * downscaled
+    def set_alpha(self, alpha):
+        self.alpha = alpha
+    def set_step(self, step):
+        self.step = step
+        
+    def fade_in(self, downscaled, out):
+        return self.alpha * out + (1 - self.alpha) * downscaled
 
     def minibatch_std(self, x):
         batch_statistics = torch.std(x, dim=0).mean().repeat(x.shape[0], 1 , x.shape[2], x.shape[3]) # N x Channels x Height x Width -> N
         return torch.cat([x, batch_statistics], dim=1) # 512 -> 513
 
-    def forward(self,x, alpha = 1, steps = config.SIMULATED_STEP): # steps=0 (4x4), steps=1 (8x8), ...
-        cur_step = len(self.prog_blocks) - steps
+    def forward(self,x): # steps=0 (4x4), steps=1 (8x8), ...
+        cur_step = len(self.prog_blocks) - self.step
         out = self.leaky(self.rgb_layers[cur_step](x))
 
-        if steps == 0:
+        if self.step == 0:
             out = self.minibatch_std(out)
             return self.final_block(out).view(out.shape[0], -1)
         
         downscaled = self.leaky(self.rgb_layers[cur_step+1](self.avg_pool(x)))
         out = self.avg_pool(self.prog_blocks[cur_step](out))
-        out = self.fade_in(alpha, downscaled, out)
+        out = self.fade_in(downscaled, out)
 
         for step in range(cur_step+1, len(self.prog_blocks)):
             out = self.prog_blocks[step](out)

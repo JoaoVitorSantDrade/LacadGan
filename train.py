@@ -16,12 +16,12 @@ from utils import (
     save_checkpoint,
     load_checkpoint,
     generate_examples,
+    plot_cnns_tensorboard
 )
 from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
 from tqdm import tqdm
 import config
-
 
 torch.backends.cudnn.benchmarks = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -45,10 +45,11 @@ def get_loader(image_size):
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=config.NUM_WORKERS,
-        pin_memory=True,
+        pin_memory=False,
         drop_last=True,
+        prefetch_factor=8
     )
     return loader, dataset
 
@@ -79,15 +80,16 @@ def train_fn(
         noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1).to(config.DEVICE)
 
         with torch.cuda.amp.autocast():
-            fake = gen(noise, alpha, step)
+            
+            fake = gen(noise)
             
             if config.DIFF_AUGMENTATION:
                 fake = DfAg.DiffAugment(fake)
                 real = DfAg.DiffAugment(real)
 
-            disc_real = disc(real, alpha, step)
-            disc_fake = disc(fake.detach(), alpha, step)
-            gp = gradient_penalty(disc, real, fake, alpha, step, device=config.DEVICE)
+            disc_real = disc(real)
+            disc_fake = disc(fake.detach())
+            gp = gradient_penalty(disc, real, fake,device=config.DEVICE)
             loss_disc = (
                 -(torch.mean(disc_real) - torch.mean(disc_fake))
                 + config.LAMBDA_GP * gp
@@ -105,7 +107,7 @@ def train_fn(
 
         # Train Gen
         with torch.cuda.amp.autocast():
-            gen_fake = disc(fake, alpha, step)
+            gen_fake = disc(fake)
             loss_gen = -torch.mean(gen_fake)
 
         opt_gen.zero_grad()
@@ -118,9 +120,9 @@ def train_fn(
         scaler_gen.update()
 
         alpha += cur_batch_size / (len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.5)
+        alpha += config.SPECIAL_NUMBER
         alpha = min(alpha, 1)
 
-        
 
         if batch_idx % 500 == 0:
             with torch.no_grad():
@@ -143,7 +145,7 @@ def train_fn(
         scheduler_gen.step(loss_gen)
         scheduler_disc.step(loss_disc)
 
-    print(f"Gradient Penalty: {gp.item()}")
+    print(f"Gradient Penalty: {gp.item()}\nAlpha: {alpha}")
     return tensorboard_step, alpha
 
 def main():
@@ -155,6 +157,8 @@ def main():
     else:
         gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
         disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        if config.CREATE_MODEL_GRAPH:
+            plot_cnns_tensorboard()
 
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:
@@ -211,14 +215,6 @@ def main():
             config.CHECKPOINT_CRITIC, disc, opt_disc, config.LEARNING_RATE_DISCRIMINATOR, epoch_s, step_s, config.DATASET
         )
     
-    writerGen = SummaryWriter(f"logs/LacadGan/{2**config.SIMULATED_STEP * 4}x{2**config.SIMULATED_STEP * 4}_gen")
-    writerCritc = SummaryWriter(f"logs/LacadGan/{2**config.SIMULATED_STEP * 4}x{2**config.SIMULATED_STEP * 4}_critic")
-    with torch.no_grad():
-        writerGen.add_graph(gen,config.FIXED_NOISE,verbose = False)
-        writerCritc.add_graph(disc,gen(config.FIXED_NOISE,0.5,config.SIMULATED_STEP),verbose = False)
-    writerGen.close()
-    writerCritc.close()
-
     gen.train()
     disc.train()
     tensorboard_step = 0
@@ -228,7 +224,10 @@ def main():
         img_size = 4*2**step
         print(f"Image size: {img_size}")
         
-
+        gen.set_alpha(alpha)
+        gen.set_step(step)
+        disc.set_alpha(alpha)
+        disc.set_step(step)
         for epoch in range(cur_epoch,num_epochs):
             print(f"Epoch [{epoch}/{num_epochs}]")
             tensorboard_step, alpha = train_fn(
