@@ -126,7 +126,7 @@ def train_fn(
 
         if batch_idx % 500 == 0:
             with torch.no_grad():
-                fixed_fakes = gen(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
+                fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
                 plot_to_tensorboard(
                     writer,
                     loss_disc.item(),
