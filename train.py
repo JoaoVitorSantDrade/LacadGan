@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from threading import Thread
 from wakepy import keepawake
 from datetime import datetime
-
+from tensorboard import program
 from torch.utils.tensorboard import SummaryWriter
 from utils import (
     gradient_penalty,
@@ -22,6 +22,7 @@ from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
 from tqdm import tqdm
 import config
+import pathlib
 
 torch.backends.cudnn.benchmarks = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -149,8 +150,9 @@ def train_fn(
     return tensorboard_step, alpha
 
 def main():
-    print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}")
     now = datetime.now()
+    print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}\nData: {now.strftime('%d/%m/%Y - %H:%M:%S')}\n")
+    
     if config.STYLE:
         gen = StyleGenerator(config.Z_DIM, config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
         disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
@@ -278,6 +280,11 @@ def main():
 if __name__ == "__main__":
     torch.cuda.empty_cache()
     with keepawake(keep_screen_awake=False):
+        path = str(pathlib.Path().resolve())
+        tb = program.TensorBoard()
+        tb.configure(argv=[None, '--logdir', path])
+        url = tb.launch()
+        print(f"\n\nTensorflow rodando em {url}")
         main()
 
     #python -m wakepy
