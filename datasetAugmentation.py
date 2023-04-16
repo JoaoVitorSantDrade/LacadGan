@@ -78,12 +78,10 @@ if __name__ == "__main__":
         img_size = 4*2**step
         pathlib.Path(full_path + f"/{img_size}x{img_size}/tensors").mkdir(parents=True, exist_ok=True)
         loader, dataset = get_loader(img_size)
-        loop = tqdm(loader, leave=True, smoothing=1,unit="epoch(s)")
-        total_steps = len(loop)
+        total_steps = len(loop)*factors[step]
+        loop = tqdm(loader, leave=True, smoothing=1, unit="epoch", total=total_steps)
         print(f"\nData augmentation: {img_size}x{img_size}")
         for i, tensor in enumerate(loop):
-            if i > total_steps*factors[i]:
-                break
             tensorGPU = tensor[0].to(config.DEVICE)
             tensorGPU = transformation(tensorGPU)
             for j, image in enumerate(tensorGPU):
