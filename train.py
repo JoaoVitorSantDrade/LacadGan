@@ -6,7 +6,7 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 import torch.profiler
 import diffAugmentation as DfAg
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from threading import Thread
 from wakepy import keepawake
 from datetime import datetime
@@ -27,7 +27,6 @@ from tqdm import tqdm
 import config
 import pathlib
 import warnings
-
 
 def load_tensor(x):
         x = torch.load(x,map_location=torch.device(config.DEVICE))
@@ -59,8 +58,9 @@ def get_loader(image_size):
         num_workers=config.NUM_WORKERS,
         pin_memory=False,
         drop_last=True,
-        prefetch_factor=8,
-        persistent_workers= True
+        prefetch_factor=12,
+        persistent_workers= True,
+        multiprocessing_context='spawn'
     )
     return loader, dataset
 
@@ -83,13 +83,13 @@ def train_fn(
     prof
     ):
 
-    loop = tqdm(loader, leave=True)
+    loop = tqdm(loader, leave=True, unit="Epoch(s)")
     
 
     for batch_idx, (real, _) in enumerate(loop):
-        if config.PROFILING:
-            if batch_idx >= (1 + 1 + 3) * 2:
-                break
+        #if config.PROFILING:
+            #if batch_idx >= (0 + 1 + 3) * 2:
+                #break
         cur_batch_size = real.shape[0]
 
         # Train Disc
@@ -178,17 +178,15 @@ def main():
     now = datetime.now()
     print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}\nData-Horario: {now.strftime('%d/%m/%Y - %H:%M:%S')}")
     print(f"Profiling: {config.PROFILING}\n")
-
     tensorboard_step = 0
     prof = None
     if config.PROFILING:
         prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            schedule=torch.profiler.schedule(wait=0, warmup=1, active=3, repeat=2),
             on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logs/LacadGan/{config.DATASET}/{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}/step_{tensorboard_step}'),
             record_shapes=True,
             profile_memory=True,
             with_stack=True,
-            use_cuda=True,
             with_flops=True,
             with_modules=True,
             activities=[
@@ -327,7 +325,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
     torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision('high')
     
     with keepawake(keep_screen_awake=False):
         warnings.filterwarnings("ignore")

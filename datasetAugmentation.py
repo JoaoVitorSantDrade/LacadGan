@@ -65,22 +65,27 @@ pathlib.Path(full_path).mkdir(parents=True, exist_ok=True)
 loader = DataLoader(
         dataset,
         batch_size=batchsize,
-        shuffle=False,
+        shuffle=True,
         num_workers=config.NUM_WORKERS,
         pin_memory=False,
         drop_last=False,
     )
 
-now = datetime.now()
-for step in range(config.SIMULATED_STEP):
-    img_size = 4*2**step
-    pathlib.Path(full_path + f"/{img_size}x{img_size}").mkdir(parents=True, exist_ok=True)
-    loader, dataset = get_loader(img_size)
-    loop = tqdm(loader, leave=True, smoothing=1)
-    print(f"Data augmentation: {img_size}x{img_size}")
-    for i, tensor in enumerate(loop):
-        tensorGPU = tensor[0].to(config.DEVICE)
-        tensorGPU = transformation(tensorGPU)
-        for j, image in enumerate(tensorGPU):
-            new_path = os.path.join(full_path,f"img{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
-            torch.save(image,f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors/tensor{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
+if __name__ == "__main__":
+    factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
+    now = datetime.now()
+    for step in range(config.SIMULATED_STEP):
+        img_size = 4*2**step
+        pathlib.Path(full_path + f"/{img_size}x{img_size}/tensors").mkdir(parents=True, exist_ok=True)
+        loader, dataset = get_loader(img_size)
+        loop = tqdm(loader, leave=True, smoothing=1,unit="epoch(s)")
+        total_steps = len(loop)
+        print(f"\nData augmentation: {img_size}x{img_size}")
+        for i, tensor in enumerate(loop):
+            if i > total_steps*factors[i]:
+                break
+            tensorGPU = tensor[0].to(config.DEVICE)
+            tensorGPU = transformation(tensorGPU)
+            for j, image in enumerate(tensorGPU):
+                new_path = os.path.join(full_path,f"img{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
+                torch.save(image,f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors/tensor{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")

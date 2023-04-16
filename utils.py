@@ -86,10 +86,9 @@ def gradient_penalty(critic, real, fake, device="cpu"):
         retain_graph=True,
     )[0]
 
-    with torch.autocast(device_type=config.DEVICE):
-        gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
-        gradient_norm = gradient.norm(2, dim=1)
-        gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
+    gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
+    gradient_norm = gradient.norm(2, dim=1)
+    gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
     return gradient_penalty
 
 def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
