@@ -14,14 +14,19 @@ from model import Discriminator, Generator
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(
-    writer:SummaryWriter, loss_critic, loss_gen, gp, real, fake, realDF, fakeDF, tensorboard_step, now:datetime
+    writer:SummaryWriter, loss_critic, loss_gen, gp, real, fake, realDF, fakeDF, tensorboard_step, now:datetime, gen, critic
 ):
     writer.add_scalar("loss/critic", loss_critic,global_step=tensorboard_step,new_style=True)
     writer.add_scalar("loss/gen", loss_gen,global_step=tensorboard_step,new_style=True)
     writer.add_scalar("loss/distance", abs(loss_gen) + abs(loss_gen),global_step=tensorboard_step,new_style=True)
 
     writer.add_scalar("GradientPenalty/", gp, global_step=tensorboard_step, new_style=True)
-    
+    for name, param in gen.named_parameters():
+        if param.requires_grad:
+            writer.add_histogram(f"generator/{name}",param.data,global_step=tensorboard_step,bins="auto")
+    for name, param in critic.named_parameters():
+        if param.requires_grad:
+            writer.add_histogram(f"critic/{name}",param.data,global_step=tensorboard_step,bins="auto")
     with torch.no_grad():
         img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
         img_grid_fake = torchvision.utils.make_grid(fake[:8], normalize=True)
@@ -74,7 +79,7 @@ def gradient_penalty(critic, real, fake, device="cpu"):
     )[0]
     gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
     gradient_norm = gradient.norm(2, dim=1)
-    gradient_penalty = torch.mean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
+    gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
     return gradient_penalty
 
 def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):

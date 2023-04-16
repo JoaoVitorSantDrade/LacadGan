@@ -92,9 +92,9 @@ def train_fn(
             disc_fake = disc(fake.detach())
             gp = gradient_penalty(disc, real, fake,device=config.DEVICE)
             loss_disc = (
-                -(torch.mean(disc_real) - torch.mean(disc_fake))
+                -(torch.nanmean(disc_real) - torch.nanmean(disc_fake))
                 + config.LAMBDA_GP * gp
-                + (0.001 * torch.mean(disc_real ** 2))
+                + (0.001 * torch.nanmean(disc_real ** 2))
             )
 
         opt_disc.zero_grad()
@@ -109,7 +109,7 @@ def train_fn(
         # Train Gen
         with torch.cuda.amp.autocast():
             gen_fake = disc(fake)
-            loss_gen = -torch.mean(gen_fake)
+            loss_gen = -torch.nanmean(gen_fake)
 
         opt_gen.zero_grad()
         scaler_gen.scale(loss_gen).backward()
@@ -139,6 +139,8 @@ def train_fn(
                     DfAg.DiffAugment(fixed_fakes),
                     tensorboard_step,
                     now,
+                    gen,
+                    disc
                 )
             tensorboard_step += 1
 
@@ -202,8 +204,6 @@ def main():
 
     writer = SummaryWriter(f"logs/LacadGan/{config.DATASET}/{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}")
     
-
-
     step = int(log2(config.START_TRAIN_AT_IMG_SIZE / 4))
     cur_epoch = 0
     
@@ -224,8 +224,7 @@ def main():
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
         img_size = 4*2**step
-        print(f"Image size: {img_size}")
-        
+        print(f"Image size: {img_size}") 
         gen.set_alpha(alpha)
         gen.set_step(step)
         disc.set_alpha(alpha)
@@ -261,7 +260,6 @@ def main():
                     print(f"Erro: {err}")
 
             if config.SAVE_MODEL:
-                #save_epoch_step(epoch=epoch,step=step,dataset=config.DATASET)                 #loss_disc loss_gen
                 gen_check = Thread(target=save_checkpoint, args=(gen, opt_gen, epoch, step, config.CHECKPOINT_GEN, data_save_path,), daemon=True)
                 critic_check = Thread(target=save_checkpoint, args=(disc, opt_disc, epoch, step, config.CHECKPOINT_CRITIC, data_save_path,), daemon=True)
                 try:
@@ -282,9 +280,7 @@ if __name__ == "__main__":
     with keepawake(keep_screen_awake=False):
         path = str(pathlib.Path().resolve())
         tb = program.TensorBoard()
-        tb.configure(argv=[None, '--logdir', path])
+        tb.configure(argv=[None, '--logdir', path, '--bind_all'])
         url = tb.launch()
         print(f"\n\nTensorboard rodando em {url}")
         main()
-
-    #python -m wakepy
