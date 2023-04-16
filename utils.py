@@ -10,6 +10,7 @@ from scipy.stats import truncnorm
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from model import Discriminator, Generator
+import shutil
 
 
 # Print losses occasionally and print to tensorboard
@@ -38,6 +39,13 @@ def plot_to_tensorboard(
             writer.add_image(f'Diff_Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fakeDF, global_step=tensorboard_step)
             writer.add_image(f'Diff_Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_realDF, global_step=tensorboard_step)
 
+def remove_graphs():
+    path = pathlib.Path(str(pathlib.Path().resolve()) + f"/logs/LacadGan")
+    for files in os.listdir(path):
+        if os.path.isfile(os.path.join(path, files)):
+            if "gen" or "critic" in files:
+                file_path = pathlib.Path.joinpath(path,files)
+                shutil.rmtree(file_path)
 
 def plot_cnns_tensorboard():
 
@@ -62,7 +70,7 @@ def plot_cnns_tensorboard():
 
 def gradient_penalty(critic, real, fake, device="cpu"):
     BATCH_SIZE, C, H, W = real.shape
-    beta = torch.rand((BATCH_SIZE, 1, 1, 1)).repeat(1, C, H, W).to(device)
+    beta = torch.rand((BATCH_SIZE, 1, 1, 1),device=config.DEVICE).repeat(1, C, H, W)
     interpolated_images = real * beta + fake.detach() * (1 - beta)
     interpolated_images.requires_grad_(True)
 
@@ -73,13 +81,15 @@ def gradient_penalty(critic, real, fake, device="cpu"):
     gradient = torch.autograd.grad(
         inputs=interpolated_images,
         outputs=mixed_scores,
-        grad_outputs=torch.ones_like(mixed_scores),
+        grad_outputs=torch.ones_like(mixed_scores,device=config.DEVICE),
         create_graph=True,
         retain_graph=True,
     )[0]
-    gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
-    gradient_norm = gradient.norm(2, dim=1)
-    gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
+
+    with torch.autocast(device_type=config.DEVICE):
+        gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
+        gradient_norm = gradient.norm(2, dim=1)
+        gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
     return gradient_penalty
 
 def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):

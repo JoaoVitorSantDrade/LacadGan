@@ -1,10 +1,12 @@
-from matplotlib.pyplot import sca
+import torch.backends.cuda
+import torch.backends.cudnn
 import torch
 import torch.optim as optim
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+import torch.profiler
 import diffAugmentation as DfAg
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from threading import Thread
 from wakepy import keepawake
 from datetime import datetime
@@ -16,33 +18,40 @@ from utils import (
     save_checkpoint,
     load_checkpoint,
     generate_examples,
-    plot_cnns_tensorboard
+    plot_cnns_tensorboard,
+    remove_graphs
 )
 from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
 from tqdm import tqdm
 import config
 import pathlib
+import warnings
 
-torch.backends.cudnn.benchmarks = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-torch.set_float32_matmul_precision('medium')
+
+def load_tensor(x):
+        x = torch.load(x,map_location=torch.device(config.DEVICE))
+        return x
+
 
 def get_loader(image_size):
     transform = transforms.Compose(
         [
             transforms.Resize((image_size,image_size)),
             transforms.ToTensor(),
-            transforms.Normalize(
-                [0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
-                [0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
-            ),
+            #transforms.Normalize(
+                #[0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
+                #[0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
+            #),
         ]
     )
+
+    
     batch_size = config.BATCH_SIZES[int(log2(image_size / 4))]
-    dataset = datasets.ImageFolder(root=f"Datasets/{config.DATASET}", transform=transform)
+    #dataset1 = TensorDataset(torch.arange(10).view(10, 1))
+    #dataset = datasets.ImageFolder(root=f"Datasets/{config.DATASET}/{image_size}x{image_size}")
+    
+    dataset = datasets.DatasetFolder(root=f"Datasets/{config.DATASET}/{image_size}x{image_size}",loader=load_tensor,extensions=['.pt'])
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -50,7 +59,8 @@ def get_loader(image_size):
         num_workers=config.NUM_WORKERS,
         pin_memory=False,
         drop_last=True,
-        prefetch_factor=8
+        prefetch_factor=8,
+        persistent_workers= True
     )
     return loader, dataset
 
@@ -70,15 +80,20 @@ def train_fn(
     scheduler_gen,
     scheduler_disc,
     now,
+    prof
     ):
-    
+
     loop = tqdm(loader, leave=True)
+    
+
     for batch_idx, (real, _) in enumerate(loop):
-        real = real.to(config.DEVICE)
+        if config.PROFILING:
+            if batch_idx >= (1 + 1 + 3) * 2:
+                break
         cur_batch_size = real.shape[0]
 
         # Train Disc
-        noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1).to(config.DEVICE)
+        noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1,device=torch.device('cuda'))
 
         with torch.cuda.amp.autocast():
             
@@ -96,6 +111,8 @@ def train_fn(
                 + config.LAMBDA_GP * gp
                 + (0.001 * torch.nanmean(disc_real ** 2))
             )
+        if config.PROFILING:
+            prof.step()
 
         opt_disc.zero_grad()
         scaler_disc.scale(loss_disc).backward()
@@ -119,10 +136,11 @@ def train_fn(
 
         scaler_gen.step(opt_gen)
         scaler_gen.update()
-
-        alpha += cur_batch_size / (len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.5)
-        alpha += config.SPECIAL_NUMBER
-        alpha = min(alpha, 1)
+        
+        with torch.cuda.amp.autocast():
+            alpha += cur_batch_size / (len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.5)
+            alpha += config.SPECIAL_NUMBER
+            alpha = min(alpha, 1)
 
 
         if batch_idx % 500 == 0:
@@ -144,17 +162,42 @@ def train_fn(
                 )
             tensorboard_step += 1
 
-    if config.SCHEDULER:
-        scheduler_gen.step(loss_gen)
-        scheduler_disc.step(loss_disc)
+    if config.PROFILING:
+        prof.stop()
 
+    if config.SCHEDULER:
+            scheduler_gen.step(loss_gen)
+            scheduler_disc.step(loss_disc)
+
+    
+            
     print(f"Gradient Penalty: {gp.item()}\nAlpha: {alpha}")
     return tensorboard_step, alpha
 
 def main():
     now = datetime.now()
-    print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}\nData: {now.strftime('%d/%m/%Y - %H:%M:%S')}\n")
-    
+    print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}\nData-Horario: {now.strftime('%d/%m/%Y - %H:%M:%S')}")
+    print(f"Profiling: {config.PROFILING}\n")
+
+    tensorboard_step = 0
+    prof = None
+    if config.PROFILING:
+        prof = torch.profiler.profile(
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=2),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logs/LacadGan/{config.DATASET}/{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}/step_{tensorboard_step}'),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            use_cuda=True,
+            with_flops=True,
+            with_modules=True,
+            activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+            ]
+        )
+        prof.start()
+
     if config.STYLE:
         gen = StyleGenerator(config.Z_DIM, config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
         disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
@@ -163,6 +206,7 @@ def main():
         disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
         if config.CREATE_MODEL_GRAPH:
             plot_cnns_tensorboard()
+            config.CREATE_MODEL_GRAPH = False
 
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:
@@ -219,7 +263,7 @@ def main():
     
     gen.train()
     disc.train()
-    tensorboard_step = 0
+    
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
@@ -247,6 +291,7 @@ def main():
                 schedulerGen,
                 schedulerDisc,
                 now,
+                prof
             )
         
             data_save_path = config.DATASET + "_"+ now.strftime("%d_%m_%Hh_%Mm")
@@ -276,8 +321,16 @@ def main():
 
 
 if __name__ == "__main__":
-    torch.cuda.empty_cache()
+    torch.backends.cudnn.enabled = True
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.set_float32_matmul_precision('medium')
+    
     with keepawake(keep_screen_awake=False):
+        warnings.filterwarnings("ignore")
         path = str(pathlib.Path().resolve())
         tb = program.TensorBoard()
         tb.configure(argv=[None, '--logdir', path, '--bind_all'])

@@ -4,12 +4,13 @@ import os
 from math import log2
 
 START_TRAIN_AT_IMG_SIZE = 4
-DATASET = 'test_aug'
+DATASET = 'test_aug_aug'
 CHECKPOINT_GEN = "generator.pth"
 CHECKPOINT_CRITIC = "critic.pth"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-SAVE_MODEL = True
-LOAD_MODEL = True
+PROFILING = False
+SAVE_MODEL = False
+LOAD_MODEL = False
 GENERATE_IMAGES = False
 N_TO_GENERATE = 5
 GENERATED_EPOCH_DISTANCE = 1
@@ -35,7 +36,7 @@ RESTART_LEARNING_TIMEOUT = 20
 OPTMIZER = "ADAMW" # ADAM / NADAM / RMSPROP / ADAMAX / ADAMW
 SCHEDULER = True
 STYLE = False
-CREATE_MODEL_GRAPH = True
+CREATE_MODEL_GRAPH = False
 SPECIAL_NUMBER = 1e-5
 
 # 30 Progressive Epochs
