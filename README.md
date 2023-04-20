@@ -3,7 +3,9 @@
 
 Feitos:
 Salvamento da Model
+
 Corrigido erro ao salvar imagem por tamanho (Ficava desformatado)
+
 Implementação de TTUR (Two Time Scale Update Rule) - Paper (FEITO - 15/08/2022)
 
 Implementação de Minibatch Descrimination - (FEITO - 20/07/22)
@@ -20,6 +22,15 @@ Salvar Epoch e Step em binário - (FEITO - 21/11/2022)
 
 Correção do UTILs.py - (FEITO - 23/11/2022)
 
+Adicionar Ruido nas imagens reais e sintéticas (Generator) para melhorar estabilidade das imagens geradas - Paper
+
+Implementação da ADAIN (Adapative Instance Normalization)
+
+Implementação do Restart Learning rate do descriminador - Paper - Começo em 01/02/23
+
+Implementação do Stochastic Weight Averaging (SWA) - (FEITO - 18/04/2023) 
+
+Resolvido problema com o datasetAugmentation.py - (FEITO - 19/04/2023)
  Perguntas:
 
  Como treinar uma GAN com dataset de tamanho limitado? - Feito
@@ -27,12 +38,11 @@ Correção do UTILs.py - (FEITO - 23/11/2022)
 
  To Do:
  
+ Gradient Acumulation - Não funcionou (18/04/2023)
+ Gradient Checkpointing
  Implementação de Feature Matching
  Implementar Feature learning (Fazer a GAN diferenciar entre os tipos de imagem gerada)
  Implementação de Multi Scale Gradient - Paper
- Adicionar Ruido nas imagens reais e sintéticas (Generator) para melhorar estabilidade das imagens geradas - Paper
- Implementação da ADAIN (Adapative Instance Normalization)
- Implementação do Restart Learning rate do descriminador - Paper - Começo em 01/02/23
 
 
 Observações:

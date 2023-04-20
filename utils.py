@@ -15,29 +15,35 @@ import shutil
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(
-    writer:SummaryWriter, loss_critic, loss_gen, gp, real, fake, realDF, fakeDF, tensorboard_step, now:datetime, gen, critic
+    writer:SummaryWriter, loss_critic, loss_gen, real, fake, tensorboard_step, now:datetime, gen, critic, gp
 ):
+    # precision = true_p/(true_p+false_p+config.SPECIAL_NUMBER)
+    # recall = true_p/(true_p+false_n+config.SPECIAL_NUMBER)
+    # writer.add_scalars("precision_recall", {"precision":precision, "recall":recall}, global_step=tensorboard_step)
     writer.add_scalar("loss/critic", loss_critic,global_step=tensorboard_step,new_style=True)
     writer.add_scalar("loss/gen", loss_gen,global_step=tensorboard_step,new_style=True)
     writer.add_scalar("loss/distance", abs(loss_gen) + abs(loss_gen),global_step=tensorboard_step,new_style=True)
 
     writer.add_scalar("GradientPenalty/", gp, global_step=tensorboard_step, new_style=True)
     for name, param in gen.named_parameters():
-        if param.requires_grad:
-            writer.add_histogram(f"generator/{name}",param.data,global_step=tensorboard_step,bins="auto")
+        if param.requires_grad and "weight" in name:
+            writer.add_histogram(f"generator/{name}",param.data,global_step=tensorboard_step)
     for name, param in critic.named_parameters():
-        if param.requires_grad:
-            writer.add_histogram(f"critic/{name}",param.data,global_step=tensorboard_step,bins="auto")
+        if param.requires_grad and "weight" in name:
+            writer.add_histogram(f"critic/{name}",param.data,global_step=tensorboard_step)
+
     with torch.no_grad():
         img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
         img_grid_fake = torchvision.utils.make_grid(fake[:8], normalize=True)
-        writer.add_image(f'Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_real, global_step=tensorboard_step)
-        writer.add_image(f'Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fake, global_step=tensorboard_step)
-        if config.DIFF_AUGMENTATION:
-            img_grid_realDF = torchvision.utils.make_grid(realDF[:8], normalize=True)
-            img_grid_fakeDF = torchvision.utils.make_grid(fakeDF[:8], normalize=True)
-            writer.add_image(f'Diff_Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fakeDF, global_step=tensorboard_step)
-            writer.add_image(f'Diff_Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_realDF, global_step=tensorboard_step)
+        if config.LOAD_MODEL:
+            aux = f"{config.WHERE_LOAD}"
+            aux = aux.replace(f"{config.DATASET}_","")
+            writer.add_image(f'Real/{config.DATASET}-{aux}',img_grid_real, global_step=tensorboard_step)
+            writer.add_image(f'Fake/{config.DATASET}-{aux}',img_grid_fake, global_step=tensorboard_step)
+        else:
+            writer.add_image(f'Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_real, global_step=tensorboard_step)
+            writer.add_image(f'Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fake, global_step=tensorboard_step)
+    return
 
 def remove_graphs():
     path = pathlib.Path(str(pathlib.Path().resolve()) + f"/logs/LacadGan")
@@ -66,11 +72,9 @@ def plot_cnns_tensorboard():
         writerGen.close()
         writerCritc.close()
         
-
-
-def gradient_penalty(critic, real, fake, device="cpu"):
+def gradient_penalty(critic, real, fake):
     BATCH_SIZE, C, H, W = real.shape
-    beta = torch.rand((BATCH_SIZE, 1, 1, 1),device=config.DEVICE).repeat(1, C, H, W)
+    beta = torch.rand((BATCH_SIZE, 1, 1, 1)).repeat(1, C, H, W).to(config.DEVICE)
     interpolated_images = real * beta + fake.detach() * (1 - beta)
     interpolated_images.requires_grad_(True)
 
@@ -86,12 +90,12 @@ def gradient_penalty(critic, real, fake, device="cpu"):
         retain_graph=True,
     )[0]
 
-    gradient = gradient.view(gradient.shape[0], -1) # Troquei para reshape | era view
+    gradient = gradient.reshape((BATCH_SIZE, -1)) # Troquei para reshape | era view
     gradient_norm = gradient.norm(2, dim=1)
-    gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2) + config.SPECIAL_NUMBER
+    gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2)
     return gradient_penalty
 
-def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
+def save_checkpoint(model, optimizer,scheduler=None, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
     caminho = str(pathlib.Path().resolve()) + "/saves/" + dataset + "/" + filename
     print(f"\n=> Saving checkpoint in {filename}\n")
     checkpoint = {
@@ -99,6 +103,7 @@ def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.p
         "step": step,
         "state_dict": model.state_dict(),
         "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
     }
     try:
         torch.save(checkpoint, caminho)
@@ -106,23 +111,26 @@ def save_checkpoint(model, optimizer, epoch=0, step=0, filename="my_checkpoint.p
         pathlib.Path(str(pathlib.Path().resolve()) + "/saves/" + dataset + "/").mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, caminho)
 
+    print(f"\n=>{filename} saved!\n")
     return 
 
-def load_checkpoint(checkpoint_file, model, optimizer, lr, epoch, step, dataset="default"):
+def load_checkpoint(checkpoint_file, model, optimizer=None, epoch=0, step=0, scheduler=None, dataset="default", inference=False):
 
     caminho = str(pathlib.Path().resolve()) + "/saves/" + dataset + "/" + checkpoint_file
     try:
         print(f"\n=> Loading checkpoint in {checkpoint_file}\n")
         checkpoint = torch.load(caminho, map_location="cuda")
         model.load_state_dict(checkpoint["state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        epoch[0] = checkpoint["epoch"]
-        step[0] = checkpoint["step"]
-
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
+        if not inference:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            epoch[0] = checkpoint["epoch"]
+            step[0] = checkpoint["step"]
+            if config.SCHEDULER:
+                scheduler.load_state_dict(checkpoint["scheduler"])
+        print(f"\n=> Success loading {checkpoint_file}\n")
     except Exception as exp:
-        print(f"=> No checkpoint found in {checkpoint_file}")
+        print(f"=> No checkpoint found in {checkpoint_file} - {exp}")
+   
 
 def seed_everything(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -134,7 +142,7 @@ def seed_everything(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
+def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
     truncation = 0.7
     caminho = str(pathlib.Path().resolve()) + "/saves/" + name
     if size < 10:
@@ -154,9 +162,10 @@ def generate_examples(gen, steps, n=100,epoch=0,size=0,name="default"):
 
     for i in range(n):
         with torch.no_grad():
-            
-            noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
-            img = gen(noise, alpha, steps)
+            gen.set_alpha(alpha)
+            gen.set_step(steps)
+            noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float16)
+            img = gen(noise)
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 
     gen.train()

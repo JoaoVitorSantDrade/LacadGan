@@ -47,22 +47,25 @@ class PixelNorm(nn.Module):
         return x / torch.sqrt(torch.mean(x**2,dim=1,keepdim=True) + self.epsilon)
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, use_pixelnorm=True):
+    def __init__(self, in_channels, out_channels, use_pixelnorm=True, use_noise=False):
         super().__init__()
         self.conv1 = WSConv2d(in_channels, out_channels)
         self.conv2 = WSConv2d(out_channels, out_channels)
-        self.conv3 = WSConv2d(out_channels, out_channels)
         self.noise = injectNoise(out_channels)
-        self.leaky = nn.GELU()
+        self.drop1 = nn.Dropout(0.4)
+        self.leaky1 = nn.LeakyReLU()
+        self.leaky2 = nn.LeakyReLU()
         self.pn = PixelNorm()
         self.use_pn = use_pixelnorm
+        self.use_noise = use_noise
 
     def forward(self, x):
-        x = self.leaky(self.conv1(x))
+        x = self.leaky1(self.drop1(self.conv1(x)))
         x = self.pn(x) if self.use_pn else x
-        x = self.leaky(self.conv2(self.noise(x)))
+        x = self.noise(x) if self.use_noise else x
+        x = self.leaky2(self.conv2(x))
         x = self.pn(x) if self.use_pn else x
-        x = self.leaky(self.conv3(x))
+
         return x
 
 class MappingNetwork(nn.Module):
@@ -70,38 +73,34 @@ class MappingNetwork(nn.Module):
         super().__init__()
         self.mapping = nn.Sequential(
             PixelNorm(),
-            WSLinear(z_dim, w_dim),
+            nn.Linear(z_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
             nn.ReLU(),
-            WSLinear(w_dim, w_dim),
+            nn.Linear(w_dim, w_dim),
         )
     
     def forward(self,x):
         return self.mapping(x)
 
 class AdaIN(nn.Module):
-    def __init__(self, channels, w_dim):
+    def __init__(self, channels):
         super().__init__()
         self.instance_norm = nn.InstanceNorm2d(channels)
-        self.style_scale   = WSLinear(w_dim, channels)
-        self.style_bias    = WSLinear(w_dim, channels)
 
     def forward(self,x): # removi o w
         x = self.instance_norm(x)
-        #style_scale = self.style_scale(w).unsqueeze(2).unsqueeze(3)
-        #style_bias  = self.style_bias(w).unsqueeze(2).unsqueeze(3)
-        return x #style_scale * x + style_bias
+        return x
 
 class injectNoise(nn.Module):
     def __init__(self, channels):
@@ -113,15 +112,15 @@ class injectNoise(nn.Module):
         return x + self.weight + noise
 
 class GenBlock(nn.Module):
-    def __init__(self, in_channel, out_channel, w_dim):
+    def __init__(self, in_channel, out_channel):
         super(GenBlock, self).__init__()
         self.conv1 = WSConv2d(in_channel, out_channel)
         self.conv2 = WSConv2d(out_channel, out_channel)
         self.leaky = nn.LeakyReLU(0.2, inplace=True)
         self.inject_noise1 = injectNoise(out_channel)
         self.inject_noise2 = injectNoise(out_channel)
-        self.adain1 = AdaIN(out_channel, w_dim)
-        self.adain2 = AdaIN(out_channel, w_dim)
+        self.adain1 = AdaIN(out_channel)
+        self.adain2 = AdaIN(out_channel)
     def forward(self, x): #removi o w
         x = self.adain1(self.leaky(self.inject_noise1(self.conv1(x)))) #self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
         x = self.adain2(self.leaky(self.inject_noise2(self.conv2(x)))) #self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
@@ -180,10 +179,9 @@ class Generator(nn.Module):
         self.initial = nn.Sequential(
             PixelNorm(),
             nn.ConvTranspose2d(z_dim, in_channels, 4, 1, 0), #1x1 -> 4x4
-            nn.ELU(),
+            nn.LeakyReLU(), 
             WSConv2d(in_channels,in_channels,kernel_size=3,stride=1,padding=1),
-            nn.ELU(),
-            PixelNorm(),
+            nn.LeakyReLU(),
         )
         self.step = 0
         self.alpha = 0
@@ -196,7 +194,7 @@ class Generator(nn.Module):
             # factors[i] -> factors[i+1]
             conv_in_c = int(in_channels * factors[i])
             conv_out_c = int(in_channels * factors[i+1])
-            self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c))
+            self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c,use_noise=True))
             self.rgb_layers.append(WSConv2d(conv_out_c,img_channels, kernel_size=1,stride=1, padding=0))
             
     def set_step(self, step):
@@ -215,7 +213,7 @@ class Generator(nn.Module):
             return self.initial_rgb(out)
 
         for step in range(self.step):
-            upscaled = F.interpolate(out, scale_factor=2, mode="nearest")
+            upscaled = F.interpolate(out, scale_factor=2, mode="bilinear")
             out = self.prog_blocks[step](upscaled)
 
         final_upscaled = self.rgb_layers[self.step-1](upscaled)
@@ -226,7 +224,8 @@ class Discriminator(nn.Module):
     def __init__(self,in_channels, img_channels=3):
         super().__init__()
         self.prog_blocks, self.rgb_layers = nn.ModuleList(), nn.ModuleList()
-        self.leaky = nn.LeakyReLU(0.2)
+        
+        self.leaky = nn.LeakyReLU()
          
         self.step = 0
         self.alpha = 0
@@ -240,16 +239,15 @@ class Discriminator(nn.Module):
         # this is for 4x4 resolution
         self.initial_rgb = WSConv2d(img_channels, in_channels, kernel_size=1, stride=1,padding=0)
         self.rgb_layers.append(self.initial_rgb)
-        self.avg_pool = nn.AvgPool2d(kernel_size=2,stride=2)
+        self.avg_pool = nn.AvgPool2d(kernel_size=2,stride=2) # Downscaling layer
 
         # block for 4x4 resolution
         self.final_block = nn.Sequential(
             WSConv2d(in_channels+1,in_channels, kernel_size=3,padding=1),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(),
             WSConv2d(in_channels,in_channels,kernel_size=4,stride=1, padding=0),
-            nn.LeakyReLU(0.2),
-            WSConv2d(in_channels, 1, kernel_size=1,stride=1, padding=0), # Linear
-
+            nn.LeakyReLU(),
+            WSConv2d(in_channels, 1, kernel_size=1,stride=1, padding=0),
         )
     def set_alpha(self, alpha):
         self.alpha = alpha
@@ -387,19 +385,16 @@ if __name__ == "__main__":
     gen = Generator(Z_DIM,IN_CHANNELS,img_channels=3)
     disc = Discriminator(IN_CHANNELS, img_channels=3)
 
-    gen_size = sum(p.numel() for p in gen.parameters() if p.requires_grad)
-    print(gen_size)
-
-    disc_size = sum(p.numel() for p in disc.parameters() if p.requires_grad)
-    print(
-        disc_size
-    )
-
     for img_size in [4, 8, 16, 32, 64, 128, 256, 512, 1024]:
         num_steps = int(log2(img_size / 4))
         x = torch.randn((1, Z_DIM, 1 ,1))
-        z = gen(x, 0.5, steps=num_steps)
+        gen.set_alpha(0.5)
+        gen.set_step(num_steps)
+        z = gen(x)
         assert z.shape == (1, 3, img_size, img_size)
-        out = disc(z, alpha=0.5, steps=num_steps)
+        disc.set_step(num_steps)
+        disc.set_alpha(0.5)
+        disc.forward(z)
+        out = disc(z)
         assert out.shape == (1,1)
         print(f"Success! At img size: {img_size}")

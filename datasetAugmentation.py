@@ -15,7 +15,7 @@ torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 torch.set_float32_matmul_precision('medium')
 
-batchsize = 64
+batchsize = 128
 full_path = str(pathlib.Path().resolve()) + f"/Datasets/{config.DATASET}_aug/"
 
 def get_loader(image_size):
@@ -38,7 +38,7 @@ def get_loader(image_size):
         shuffle=True,
         num_workers=config.NUM_WORKERS,
         pin_memory=True,
-        drop_last=True,
+        drop_last=False,
     )
     return loader, dataset
 
@@ -69,21 +69,22 @@ loader = DataLoader(
         num_workers=config.NUM_WORKERS,
         pin_memory=False,
         drop_last=False,
+        prefetch_factor=16
     )
 
 if __name__ == "__main__":
-    factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
-    now = datetime.now()
     for step in range(config.SIMULATED_STEP):
         img_size = 4*2**step
         pathlib.Path(full_path + f"/{img_size}x{img_size}/tensors").mkdir(parents=True, exist_ok=True)
         loader, dataset = get_loader(img_size)
-        total_steps = len(loop)*factors[step]
-        loop = tqdm(loader, leave=True, smoothing=1, unit="epoch", total=total_steps)
+        loop = tqdm(loader, leave=False, smoothing=1, miniters=1, unit_scale=True)
+        #total_steps = len(loop)*factors[step]
         print(f"\nData augmentation: {img_size}x{img_size}")
         for i, tensor in enumerate(loop):
             tensorGPU = tensor[0].to(config.DEVICE)
             tensorGPU = transformation(tensorGPU)
-            for j, image in enumerate(tensorGPU):
-                new_path = os.path.join(full_path,f"img{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
-                torch.save(image,f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors/tensor{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
+            for j in range(tensorGPU.shape[0]):
+                torch.save(tensorGPU[j].clone(), f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors/tensor{i + j + (i)*batchsize}.pt")
+            #for j, image in enumerate(tensorGPU):
+                #new_path = os.path.join(full_path,f"img{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
+                #torch.save(image.clone(),f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors/tensor{(i + j) + (i)*batchsize}-{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}.pt")
