@@ -22,15 +22,15 @@ def plot_to_tensorboard(
     # writer.add_scalars("precision_recall", {"precision":precision, "recall":recall}, global_step=tensorboard_step)
     writer.add_scalar("loss/critic", loss_critic,global_step=tensorboard_step,new_style=True)
     writer.add_scalar("loss/gen", loss_gen,global_step=tensorboard_step,new_style=True)
-    writer.add_scalar("loss/distance", abs(loss_gen) + abs(loss_gen),global_step=tensorboard_step,new_style=True)
+    writer.add_scalar("loss/distance", abs(loss_gen) + abs(loss_critic),global_step=tensorboard_step,new_style=True)
 
     writer.add_scalar("GradientPenalty/", gp, global_step=tensorboard_step, new_style=True)
-    for name, param in gen.named_parameters():
-        if param.requires_grad and "weight" in name:
-            writer.add_histogram(f"generator/{name}",param.data,global_step=tensorboard_step)
-    for name, param in critic.named_parameters():
-        if param.requires_grad and "weight" in name:
-            writer.add_histogram(f"critic/{name}",param.data,global_step=tensorboard_step)
+    # for name, param in gen.named_parameters():
+    #     if param.requires_grad and "weight" in name:
+    #         writer.add_histogram(f"generator/{name}",param.data,global_step=tensorboard_step)
+    # for name, param in critic.named_parameters():
+    #     if param.requires_grad and "weight" in name:
+    #         writer.add_histogram(f"critic/{name}",param.data,global_step=tensorboard_step)
 
     with torch.no_grad():
         img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
@@ -43,6 +43,8 @@ def plot_to_tensorboard(
         else:
             writer.add_image(f'Real/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_real, global_step=tensorboard_step)
             writer.add_image(f'Fake/{config.DATASET}-{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}',img_grid_fake, global_step=tensorboard_step)
+        if config.VIDEO:
+            save_image(fake,pathlib.Path(config.FOLDER_PATH + f"/images/img_{tensorboard_step}.jpeg"))
     return
 
 def remove_graphs():
@@ -96,8 +98,7 @@ def gradient_penalty(critic, real, fake):
     return gradient_penalty
 
 def save_checkpoint(model, optimizer,scheduler=None, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
-    caminho = str(pathlib.Path().resolve()) + "/saves/" + dataset + "/" + filename
-    print(f"\n=> Saving checkpoint in {filename}\n")
+    caminho = config.FOLDER_PATH + "/saves/" + dataset + "/" + filename
     checkpoint = {
         "epoch": epoch,
         "step": step,
@@ -108,15 +109,13 @@ def save_checkpoint(model, optimizer,scheduler=None, epoch=0, step=0, filename="
     try:
         torch.save(checkpoint, caminho)
     except:
-        pathlib.Path(str(pathlib.Path().resolve()) + "/saves/" + dataset + "/").mkdir(parents=True, exist_ok=True)
+        pathlib.Path(config.FOLDER_PATH + "/saves/" + dataset + "/").mkdir(parents=True, exist_ok=True)
         torch.save(checkpoint, caminho)
-
-    print(f"\n=>{filename} saved!\n")
     return 
 
 def load_checkpoint(checkpoint_file, model, optimizer=None, epoch=0, step=0, scheduler=None, dataset="default", inference=False):
 
-    caminho = str(pathlib.Path().resolve()) + "/saves/" + dataset + "/" + checkpoint_file
+    caminho = config.FOLDER_PATH + "/saves/" + dataset + "/" + checkpoint_file
     try:
         print(f"\n=> Loading checkpoint in {checkpoint_file}\n")
         checkpoint = torch.load(caminho, map_location="cuda")
@@ -144,7 +143,7 @@ def seed_everything(seed=42):
 
 def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
     truncation = 0.7
-    caminho = str(pathlib.Path().resolve()) + "/saves/" + name
+    caminho = config.FOLDER_PATH + "/saves/" + name
     if size < 10:
         parent_dir = caminho + "/size_0"+ str(size) +"/"
     else:
@@ -164,8 +163,14 @@ def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
         with torch.no_grad():
             gen.set_alpha(alpha)
             gen.set_step(steps)
-            noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float16)
-            img = gen(noise)
+
+            if config.VIDEO:
+                noise = config.FIXED_NOISE[0]
+                img = gen(noise)
+            else:
+                noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float16)
+                img = gen(noise)
+
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 
     gen.train()

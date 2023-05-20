@@ -1,15 +1,14 @@
+import os
 import torch.backends.cuda
 import torch.backends.cudnn
-import torch.nn.functional as functional
 import torch
 import torch.optim as optim
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
-import torch.profiler
+from wakepy import keepawake 
 import diffAugmentation as DfAg
 from torch.utils.data import DataLoader
 from threading import Thread
-from wakepy import keepawake
 from datetime import datetime
 from tensorboard import program
 from torch.utils.tensorboard import SummaryWriter
@@ -26,31 +25,29 @@ from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
 from tqdm import tqdm
 import config
-import pathlib
 import warnings
 from torchcontrib.optim import SWA
 
+
 def load_tensor(x):
-        x = torch.load(x,map_location=torch.device(config.DEVICE))
+        """
+        Carrega um tensor diretamente no Device escolhido.
+
+        Usado em get_loader
+        
+        :return: o Tensor já carregado no Device
+        """
+        x = torch.load(x, map_location="cpu")
+        x.to(torch.float32)
         return x
 
-
 def get_loader(image_size):
-    transform = transforms.Compose(
-        [
-            transforms.Resize((image_size,image_size)),
-            transforms.ToTensor(),
-            #transforms.Normalize(
-                #[0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
-                #[0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
-            #),
-        ]
-    )
+    """
+    Retorna um Loader e Um Dataset
 
-    
+    image_size: Dimensão das imagens que vão ser lidas do dataset
+    """
     batch_size = config.BATCH_SIZES[int(log2(image_size / 4))]
-    #dataset1 = TensorDataset(torch.arange(10).view(10, 1))
-    #dataset = datasets.ImageFolder(root=f"Datasets/{config.DATASET}/{image_size}x{image_size}")
     
     dataset = datasets.DatasetFolder(root=f"Datasets/{config.DATASET}/{image_size}x{image_size}",loader=load_tensor,extensions=['.pt'])
     loader = DataLoader(
@@ -58,11 +55,11 @@ def get_loader(image_size):
         batch_size=batch_size,
         shuffle=True,
         num_workers=config.NUM_WORKERS,
-        pin_memory=False,
+        pin_memory=True,
         drop_last=True,
-        prefetch_factor=24,
-        persistent_workers= True,
-        multiprocessing_context='spawn'
+        prefetch_factor=64,
+        persistent_workers=True,
+        multiprocessing_context='spawn',
     )
     return loader, dataset
 
@@ -82,28 +79,25 @@ def train_fn(
     scheduler_gen,
     scheduler_disc,
     now,
-    prof
     ):
 
-    loop = tqdm(loader, leave=True, unit_scale=True, desc="Training step")
-
-
+    loop = tqdm(loader, leave=True, unit_scale=True, smoothing=1.0, colour="cyan", ncols=80, desc="batch training")
+    loss_gen = 0
     for batch_idx, (real, _) in enumerate(loop):
+        # imagens por segundo batch_size * it
+
         opt_disc.zero_grad(set_to_none = True)
         opt_gen.zero_grad(set_to_none = True)
 
-        real = real.contiguous(memory_format=torch.channels_last)
-        #if config.PROFILING:
-            #if batch_idx >= (0 + 1 + 3) * 2:
-                #break
-        
-        cur_batch_size = real.shape[0]
-
+        cur_batch_size = 0
+        real = real.cuda()
         # Train Disc
-        noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1,device=torch.device('cuda'))
-        noise = noise.contiguous(memory_format=torch.channels_last)
         with torch.cuda.amp.autocast():
-            
+            real = real.contiguous(memory_format=torch.channels_last)
+            cur_batch_size = real.shape[0]
+
+            noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1,device=torch.device('cuda'))
+            noise = noise.contiguous(memory_format=torch.channels_last)
             fake = gen(noise)
             
             if config.DIFF_AUGMENTATION:
@@ -114,84 +108,66 @@ def train_fn(
             disc_fake = disc(fake.detach()) #False Positives/Negatives
 
             gp = gradient_penalty(disc, real, fake)
+            
             loss_disc = (
                 -(torch.nanmean(disc_real) - torch.nanmean(disc_fake))
                 + config.LAMBDA_GP * gp
-                + (0.001 * torch.nanmean(disc_real ** 2))
+                + (0.01 * torch.nanmean(disc_real ** 2)) 
             )
-
-        if config.PROFILING:
-            prof.step()
 
         scaler_disc.scale(loss_disc).backward()
         scaler_disc.step(opt_disc)
         scaler_disc.update()
 
-        # Train Gen
-        with torch.cuda.amp.autocast():
+        if batch_idx % config.CRITIC_TREAINING_STEPS == 0:
+            # Train Gen
             gen_fake = disc(fake)
             loss_gen = -torch.nanmean(gen_fake)
+            
+            
+            scaler_gen.scale(loss_gen).backward()
+            scaler_gen.step(opt_gen)
+            scaler_gen.update()
         
-        
-        scaler_gen.scale(loss_gen).backward()
-        scaler_gen.step(opt_gen)
-        scaler_gen.update()
-        
-        with torch.cuda.amp.autocast():
-            alpha += cur_batch_size / (len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.5)
-            alpha += config.SPECIAL_NUMBER
-            alpha = min(alpha, 1)
-            gen.set_alpha(alpha)
-            disc.set_alpha(alpha)            
+        alpha += cur_batch_size / ((len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.50))
+        alpha = min(alpha, 1)
+        gen.set_alpha(alpha)
+        disc.set_alpha(alpha)
 
-    with torch.no_grad():
-        fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
-        plot_thread = Thread(target=plot_to_tensorboard, args=(writer, loss_disc.item(), loss_gen.item(), real.detach(), fixed_fakes.detach(), tensorboard_step, now, gen, disc, gp,), daemon=True)
-        plot_thread.start()           
-    
-    tensorboard_step += 1   
-    if config.PROFILING:
-        prof.stop()
+        if batch_idx % 2 == 0:    
+            with torch.no_grad():
+                fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
+                plot_thread = Thread(target=plot_to_tensorboard, args=(writer, loss_disc.detach(), loss_gen.detach(), real.detach(), fixed_fakes.detach(), tensorboard_step, now, gen, disc, gp,), daemon=True)
+                plot_thread.start()
+            tensorboard_step += 1
+
+    if config.SCHEDULER:
+        scheduler_gen.step()
+        scheduler_disc.step()
+
 
     if config.OPTMIZER == "SWA":
         opt_disc.swap_swa_sgd()
         opt_gen.swap_swa_sgd()
 
-    if config.SCHEDULER:
-        scheduler_gen.step()
-        scheduler_disc.step()
+    
   
-    print(f"Gradient Penalty: {gp.item()}\nAlpha: {alpha}")
+    print(f"Gradient Penalty: {gp.detach()}\nAlpha: {alpha}")
     return tensorboard_step, alpha
 
 def main():
     now = datetime.now()
+    
     print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}\nData-Horario: {now.strftime('%d/%m/%Y - %H:%M:%S')}")
-    print(f"Profiling: {config.PROFILING}\nCuDNN: {torch.backends.cudnn.version()} ")
+    print(f"CuDNN: {torch.backends.cudnn.version()}\n")
     tensorboard_step = 0
-    prof = None
-    if config.PROFILING:
-        prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=0, warmup=1, active=3, repeat=2),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logs/LacadGan/{config.DATASET}/{now.strftime("%d-%m-%Y-%Hh%Mm%Ss")}/step_{tensorboard_step}'),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-            with_flops=True,
-            with_modules=True,
-            activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-            ]
-        )
-        prof.start()
 
     if config.STYLE:
         gen = StyleGenerator(config.Z_DIM, config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
         disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
     else:
-        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
-        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True)
+        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True)
         if config.CREATE_MODEL_GRAPH:
             plot_cnns_tensorboard()
             config.CREATE_MODEL_GRAPH = False
@@ -202,23 +178,23 @@ def main():
             opt_gen = optim.RMSprop(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, weight_decay=config.WEIGHT_DECAY, foreach=True,momentum=0.5)
             opt_disc = optim.RMSprop(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY, foreach=True, momentum=0.5)
         case "ADAM":
-            opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99),weight_decay=config.WEIGHT_DECAY)
-            opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99),weight_decay=config.WEIGHT_DECAY)
+            opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER,weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER,weight_decay=config.WEIGHT_DECAY)
         case "NADAM":
-            opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "ADAMAX":
-            opt_gen = optim.Adamax(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            opt_disc = optim.Adamax(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            opt_gen = optim.Adamax(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.Adamax(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "ADAMW":
-            opt_gen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            opt_disc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            opt_gen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY, fused=True)
+            opt_disc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY, fused=True)
         case "ADAGRAD":
-            opt_gen = optim.Adagrad(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, weight_decay=config.WEIGHT_DECAY)
-            opt_disc = optim.Adagrad(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY)
+            opt_gen = optim.Adagrad(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.Adagrad(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "SGD":
-            opt_gen = optim.SGD(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR,momentum=0.9, weight_decay=config.WEIGHT_DECAY)
-            opt_disc = optim.SGD(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,momentum=0.9, weight_decay=config.WEIGHT_DECAY)
+            opt_gen = optim.SGD(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR,momentum=0.9, nesterov=True, weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.SGD(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,momentum=0.9, nesterov=True, weight_decay=config.WEIGHT_DECAY)
         case "SAM": #https://github.com/davda54/sam https://github.com/mosaicml/composer/tree/dev/composer/algorithms/sam
             #opt_gen = optim.AdamW
             #opt_disc = optim.AdamW
@@ -226,10 +202,17 @@ def main():
             #opt_disc = sam.SAM(disc.parameters(),opt_gen, lr=config.LEARNING_RATE_GENERATOR, momentum=0.9, weight_decay=config.WEIGHT_DECAY)
             raise NotImplementedError("Sam is not implemented")
         case "SWA":
-            baseGen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            baseDisc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            baseGen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            baseDisc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_gen = SWA(baseGen,swa_start=10,swa_freq=5,swa_lr=0.05)
-            opt_disc = SWA(baseDisc,swa_start=10,swa_freq=5,swa_lr=0.05) 
+            opt_disc = SWA(baseDisc,swa_start=10,swa_freq=5,swa_lr=0.05)
+        case "ADAMW8":
+            #baseGen = bnb.optim.AdamW8bit(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            #baseDisc = bnb.optim.AdamW8bit(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            raise NotImplementedError("ADAMW8 do not work on Windows")
+        case "RADAM":
+            opt_gen = optim.RAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.RAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case _:
             raise NotImplementedError(f"Optim function not implemented")
 
@@ -238,13 +221,13 @@ def main():
     #Olhar mais a fundo
     schedulerGen = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt_gen,
-        T_0=config.PATIENCE_DECAY-5,
+        T_0=config.PATIENCE_DECAY,
         T_mult=1,
         eta_min=config.MIN_LEARNING_RATE, 
         )
     schedulerDisc = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt_disc,
-        T_0=config.PATIENCE_DECAY-5,
+        T_0=config.PATIENCE_DECAY,
         T_mult=1,
         eta_min=config.MIN_LEARNING_RATE, 
         )
@@ -279,9 +262,6 @@ def main():
         cur_epoch = epoch_s[0] + 1
         tensorboard_step += cur_epoch
     
-    gen.train()
-    disc.train()
-    
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
@@ -291,7 +271,8 @@ def main():
         disc.set_alpha(alpha)
         disc.set_step(step)
         for epoch in range(cur_epoch,num_epochs):
-            print(torch.cuda.memory_summary(0))
+            gen.train()
+            disc.train()
             print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{img_size} - Batch size:{config.BATCH_SIZES[step]}")
             tensorboard_step, alpha = train_fn(
                 disc,
@@ -309,7 +290,6 @@ def main():
                 schedulerGen,
                 schedulerDisc,
                 now,
-                prof
             )
 
             if config.LOAD_MODEL:
@@ -335,7 +315,6 @@ def main():
                     critic_check.join()
                 except Exception as err:
                     print(f"Erro: {err}")
-            
 
         step += 1
         cur_epoch = 0
@@ -345,14 +324,16 @@ if __name__ == "__main__":
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.set_float32_matmul_precision('medium')
-    
+    torch.autograd.set_detect_anomaly(False)
+    torch.autograd.emit_nvtx = False
+    torch.set_num_threads(2)
+
     with keepawake(keep_screen_awake=False):
         warnings.filterwarnings("ignore")
-        path = str(pathlib.Path().resolve())
+        path = config.FOLDER_PATH
         tb = program.TensorBoard()
         tb.configure(argv=[None, '--logdir', path, '--bind_all'])
         url = tb.launch()

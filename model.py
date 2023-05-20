@@ -52,17 +52,18 @@ class ConvBlock(nn.Module):
         self.conv1 = WSConv2d(in_channels, out_channels)
         self.conv2 = WSConv2d(out_channels, out_channels)
         self.noise = injectNoise(out_channels)
-        self.drop1 = nn.Dropout(0.4)
-        self.leaky1 = nn.LeakyReLU()
-        self.leaky2 = nn.LeakyReLU()
+        self.drop1 = nn.Dropout(0.3)
+        self.leaky1 = nn.PReLU()
+        self.leaky2 = nn.PReLU()
         self.pn = PixelNorm()
         self.use_pn = use_pixelnorm
         self.use_noise = use_noise
 
     def forward(self, x):
-        x = self.leaky1(self.drop1(self.conv1(x)))
         x = self.pn(x) if self.use_pn else x
+        x = self.conv1(x)
         x = self.noise(x) if self.use_noise else x
+        x = self.leaky1(self.drop1(self.conv2(x)))
         x = self.leaky2(self.conv2(x))
         x = self.pn(x) if self.use_pn else x
 
@@ -179,9 +180,9 @@ class Generator(nn.Module):
         self.initial = nn.Sequential(
             PixelNorm(),
             nn.ConvTranspose2d(z_dim, in_channels, 4, 1, 0), #1x1 -> 4x4
-            nn.LeakyReLU(), 
+            nn.PReLU(), 
             WSConv2d(in_channels,in_channels,kernel_size=3,stride=1,padding=1),
-            nn.LeakyReLU(),
+            nn.PReLU(),
         )
         self.step = 0
         self.alpha = 0
@@ -194,7 +195,7 @@ class Generator(nn.Module):
             # factors[i] -> factors[i+1]
             conv_in_c = int(in_channels * factors[i])
             conv_out_c = int(in_channels * factors[i+1])
-            self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c,use_noise=True))
+            self.prog_blocks.append(ConvBlock(conv_in_c,conv_out_c,use_noise=False))
             self.rgb_layers.append(WSConv2d(conv_out_c,img_channels, kernel_size=1,stride=1, padding=0))
             
     def set_step(self, step):
@@ -233,7 +234,7 @@ class Discriminator(nn.Module):
         for i in range(len(factors) - 1,0,-1):
             conv_in_c = int(in_channels * factors[i])
             conv_out_c = int(in_channels * factors[i-1])
-            self.prog_blocks.append(ConvBlock(conv_in_c, conv_out_c, use_pixelnorm=False))
+            self.prog_blocks.append(ConvBlock(conv_in_c, conv_out_c, use_pixelnorm=False, use_noise=False))
             self.rgb_layers.append(WSConv2d(img_channels, conv_in_c, kernel_size=1, stride=1, padding=0))
         
         # this is for 4x4 resolution
@@ -244,9 +245,9 @@ class Discriminator(nn.Module):
         # block for 4x4 resolution
         self.final_block = nn.Sequential(
             WSConv2d(in_channels+1,in_channels, kernel_size=3,padding=1),
-            nn.LeakyReLU(),
+            nn.PReLU(),
             WSConv2d(in_channels,in_channels,kernel_size=4,stride=1, padding=0),
-            nn.LeakyReLU(),
+            nn.PReLU(),
             WSConv2d(in_channels, 1, kernel_size=1,stride=1, padding=0),
         )
     def set_alpha(self, alpha):
