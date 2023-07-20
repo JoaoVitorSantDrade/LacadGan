@@ -29,9 +29,9 @@ import warnings
 from torchcontrib.optim import SWA
 
 
-def load_tensor(x):
+def load_tensor(x): 
         """
-        Carrega um tensor diretamente no Device escolhido.
+        Carrega um tensor no CPU e converte todos os dados para torch.float32
 
         Usado em get_loader
         
@@ -49,7 +49,7 @@ def get_loader(image_size):
     """
     batch_size = config.BATCH_SIZES[int(log2(image_size / 4))]
     
-    dataset = datasets.DatasetFolder(root=f"Datasets/{config.DATASET}/{image_size}x{image_size}",loader=load_tensor,extensions=['.pt'])
+    dataset = datasets.DatasetFolder(root=f"Datasets/{config.DATASET}_aug/{image_size}x{image_size}",loader=load_tensor,extensions=['.pt'])
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -57,7 +57,7 @@ def get_loader(image_size):
         num_workers=config.NUM_WORKERS,
         pin_memory=True,
         drop_last=True,
-        prefetch_factor=64,
+        prefetch_factor=32,
         persistent_workers=True,
         multiprocessing_context='spawn',
     )
@@ -81,38 +81,56 @@ def train_fn(
     now,
     ):
 
+    all_step = len(loader)    
     loop = tqdm(loader, leave=True, unit_scale=True, smoothing=1.0, colour="cyan", ncols=80, desc="batch training")
     loss_gen = 0
     for batch_idx, (real, _) in enumerate(loop):
         # imagens por segundo batch_size * it
 
+        # Zera os gradientes
         opt_disc.zero_grad(set_to_none = True)
-        opt_gen.zero_grad(set_to_none = True)
+        opt_gen.zero_grad(set_to_none = True) 
 
         cur_batch_size = 0
-        real = real.cuda()
+        real = real.cuda() #Passa as imagens p/ Cuda
         # Train Disc
         with torch.cuda.amp.autocast():
-            real = real.contiguous(memory_format=torch.channels_last)
+            real = real.to(memory_format=torch.channels_last) # Converte as imagens para Channel Last 
+            # https://docs.fast.ai/callback.channelslast.html 
+            # https://www.intel.com/content/www/us/en/developer/articles/technical/pytorch-vision-models-with-channels-last-on-cpu.html 
+            # https://docs.nvidia.com/deeplearning/performance/dl-performance-convolutional/index.html#tensor-layout
+
             cur_batch_size = real.shape[0]
 
             noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1,device=torch.device('cuda'))
-            noise = noise.contiguous(memory_format=torch.channels_last)
-            fake = gen(noise)
+            noise = noise.to(memory_format=torch.channels_last)
+
+            if config.STYLE:
+                fake = gen(noise,alpha,step)
+            else:
+                fake = gen(noise) # Gera imagens falsas
             
             if config.DIFF_AUGMENTATION:
                 fake = DfAg.DiffAugment(fake)
                 real = DfAg.DiffAugment(real)
 
-            disc_real = disc(real) #True Positives/Negatives
-            disc_fake = disc(fake.detach()) #False Positives/Negatives
-
-            gp = gradient_penalty(disc, real, fake)
+            if config.STYLE:
+                disc_real = disc(real,alpha,step) #True Positives/Negatives
+                disc_fake = disc(fake.detach(),alpha,step) #False Positives/Negatives
+            else:
+                disc_real = disc(real) #True Positives/Negatives
+                disc_fake = disc(fake.detach()) #False Positives/Negatives
+            
+            if config.STYLE:
+                gp = gradient_penalty(disc, real, fake, alpha, step) # Calcula gradient Penalty
+            else:
+                gp = gradient_penalty(disc, real, fake) # Calcula gradient Penalty
+            #https://paperswithcode.com/method/wgan-gp#:~:text=weight%20clipping%20parameter%20.-,A%20Gradient%20Penalty%20is%20a%20soft%20version%20of%20the%20Lipschitz,used%20as%20the%20gradient%20penalty.
             
             loss_disc = (
-                -(torch.nanmean(disc_real) - torch.nanmean(disc_fake))
+                -(torch.mean(disc_real) - torch.mean(disc_fake))
                 + config.LAMBDA_GP * gp
-                + (0.01 * torch.nanmean(disc_real ** 2)) 
+                + (0.01 * torch.mean(disc_real ** 2)) 
             )
 
         scaler_disc.scale(loss_disc).backward()
@@ -121,7 +139,10 @@ def train_fn(
 
         if batch_idx % config.CRITIC_TREAINING_STEPS == 0:
             # Train Gen
-            gen_fake = disc(fake)
+            if config.STYLE:
+                gen_fake = disc(fake,alpha,step)
+            else:
+                gen_fake = disc(fake)
             loss_gen = -torch.nanmean(gen_fake)
             
             
@@ -129,14 +150,19 @@ def train_fn(
             scaler_gen.step(opt_gen)
             scaler_gen.update()
         
-        alpha += cur_batch_size / ((len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.50))
+        alpha += cur_batch_size / ((len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.20))
         alpha = min(alpha, 1)
-        gen.set_alpha(alpha)
-        disc.set_alpha(alpha)
 
-        if batch_idx % 2 == 0:    
-            with torch.no_grad():
-                fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
+        if not config.STYLE:
+            gen.set_alpha(alpha)
+            disc.set_alpha(alpha)
+
+        if batch_idx  % 200 == 0 and config.TENSORBOARD:    
+            with torch.no_grad(): # Plotar no tensorboard
+                if config.STYLE:
+                    fixed_fakes = gen(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
+                else:
+                    fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
                 plot_thread = Thread(target=plot_to_tensorboard, args=(writer, loss_disc.detach(), loss_gen.detach(), real.detach(), fixed_fakes.detach(), tensorboard_step, now, gen, disc, gp,), daemon=True)
                 plot_thread.start()
             tensorboard_step += 1
@@ -152,7 +178,7 @@ def train_fn(
 
     
   
-    print(f"Gradient Penalty: {gp.detach()}\nAlpha: {alpha}")
+    print(f"Gradient Penalty: {gp.detach()}\tAlpha: {alpha}\nScheduler: Critic({scheduler_disc.get_lr()[0]}) - Gen({scheduler_gen.get_lr()[0]})")
     return tensorboard_step, alpha
 
 def main():
@@ -163,11 +189,11 @@ def main():
     tensorboard_step = 0
 
     if config.STYLE:
-        gen = StyleGenerator(config.Z_DIM, config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
-        disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
+        gen = StyleGenerator(config.Z_DIM, config.W_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
+        disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
     else:
-        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True)
-        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True)
+        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
+        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
         if config.CREATE_MODEL_GRAPH:
             plot_cnns_tensorboard()
             config.CREATE_MODEL_GRAPH = False
@@ -186,9 +212,11 @@ def main():
         case "ADAMAX":
             opt_gen = optim.Adamax(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.Adamax(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
-        case "ADAMW":
-            opt_gen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY, fused=True)
-            opt_disc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY, fused=True)
+        case "ADAMW": 
+            # https://www.fast.ai/posts/2018-07-02-adam-weight-decay.html
+            # https://openreview.net/forum?id=ryQu7f-RZ&noteId=B1PDZUChG
+            opt_gen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_disc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "ADAGRAD":
             opt_gen = optim.Adagrad(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.Adagrad(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
@@ -207,9 +235,10 @@ def main():
             opt_gen = SWA(baseGen,swa_start=10,swa_freq=5,swa_lr=0.05)
             opt_disc = SWA(baseDisc,swa_start=10,swa_freq=5,swa_lr=0.05)
         case "ADAMW8":
-            #baseGen = bnb.optim.AdamW8bit(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            #baseDisc = bnb.optim.AdamW8bit(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            raise NotImplementedError("ADAMW8 do not work on Windows")
+            if os.name == 'nt':
+                raise NotImplementedError("ADAMW8 do not work on Windows")
+            baseGen = bnb.optim.AdamW8bit(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+            baseDisc = bnb.optim.AdamW8bit(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)        
         case "RADAM":
             opt_gen = optim.RAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.RAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
@@ -217,18 +246,17 @@ def main():
             raise NotImplementedError(f"Optim function not implemented")
 
 
-
-    #Olhar mais a fundo
+    # optim.lr_scheduler.CoassineWarmRestarts
     schedulerGen = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt_gen,
-        T_0=config.PATIENCE_DECAY,
-        T_mult=1,
+        T_0=config.PATIENCE_DECAY, 
+        T_mult=config.SCHEDULER_MULT,
         eta_min=config.MIN_LEARNING_RATE, 
         )
     schedulerDisc = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt_disc,
-        T_0=config.PATIENCE_DECAY,
-        T_mult=1,
+        T_0=config.PATIENCE_DECAY, 
+        T_mult=config.SCHEDULER_MULT,
         eta_min=config.MIN_LEARNING_RATE, 
         )
 
@@ -240,7 +268,7 @@ def main():
         aux = aux.replace(f"{config.DATASET}_","")
         writer = SummaryWriter(f"logs/LacadGan/{config.DATASET}/{aux}")
     else:
-        writer = SummaryWriter(f"logs/LacadGan/{config.DATASET}/{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}")
+        writer = SummaryWriter(f"logs/LacadGan/{config.DATASET}/{now.strftime('%d-%m-%Y-%Hh%Mm%Ss')}-{config.OPTMIZER}")
     
     step = int(log2(config.START_TRAIN_AT_IMG_SIZE / 4))
     cur_epoch = 0
@@ -261,15 +289,20 @@ def main():
         step = step_s[0]
         cur_epoch = epoch_s[0] + 1
         tensorboard_step += cur_epoch
-    
+        schedulerGen.last_epoch, schedulerDisc.last_epoch = cur_epoch
+
+
+    images_saw = 0
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
         img_size = 4*2**step
-        gen.set_alpha(alpha)
-        gen.set_step(step)
-        disc.set_alpha(alpha)
-        disc.set_step(step)
+        
+        if not config.STYLE:
+            gen.set_alpha(alpha)
+            gen.set_step(step)
+            disc.set_alpha(alpha)
+            disc.set_step(step)
         for epoch in range(cur_epoch,num_epochs):
             gen.train()
             disc.train()
@@ -292,10 +325,14 @@ def main():
                 now,
             )
 
+
+            images_saw = images_saw + config.BATCH_SIZES[step] * len(loader)
+            print(f"Images saw: {images_saw}")
+
             if config.LOAD_MODEL:
                 data_save_path = config.WHERE_LOAD
             else:
-                data_save_path = config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss")
+                data_save_path = config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss") + "_" + config.OPTMIZER
 
             if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1) and config.GENERATE_IMAGES:
                 img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), data_save_path,), daemon=True)
@@ -316,6 +353,11 @@ def main():
                 except Exception as err:
                     print(f"Erro: {err}")
 
+        "requires_grad = false em todas camadas que já treinou"
+        for module_name, module in gen.named_modules():
+            if f"prog_blocks.{step}" in module_name:
+                module.require_grad = False
+
         step += 1
         cur_epoch = 0
 
@@ -324,12 +366,13 @@ if __name__ == "__main__":
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.set_float32_matmul_precision('medium')
     torch.autograd.set_detect_anomaly(False)
     torch.autograd.emit_nvtx = False
-    torch.set_num_threads(2)
+    torch.set_num_threads(4)
 
     with keepawake(keep_screen_awake=False):
         warnings.filterwarnings("ignore")

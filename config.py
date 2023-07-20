@@ -5,52 +5,44 @@ from math import log2
 import torch
 import pathlib
 
-START_TRAIN_AT_IMG_SIZE = 16
-DATASET = 'test_aug'
-CHECKPOINT_GEN = "generator.pth"
-CHECKPOINT_CRITIC = "critic.pth"
-DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu"
-PROFILING = False
-SAVE_MODEL = True
-LOAD_MODEL = False
-WHERE_LOAD = "test_aug_aug_19_04_07h_02m"
-GENERATE_IMAGES = False
-N_TO_GENERATE = 5
-VIDEO = False
-GENERATED_EPOCH_DISTANCE = 1
-LEARNING_RATE_GENERATOR = 3e-4 #0.005
-LEARNING_RATE_DISCRIMINATOR = 3e-4 #0.005
+START_TRAIN_AT_IMG_SIZE = 8
+DATASET = 'PAS' # Nome do dataset
+CHECKPOINT_GEN = "generator.pth"  # Nome do checkpoint
+CHECKPOINT_CRITIC = "critic.pth" # Nome do checkpoint
+DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu" # Nome do Device
+TENSORBOARD = True
+PROFILING = False # Profiling
+SAVE_MODEL = True # Salvar modelo
+LOAD_MODEL = False # Carregar modelo
+WHERE_LOAD = "PAS_07-07-2023-18h06m57s_ADAMW" # Onde carregar o modelo
+GENERATE_IMAGES = True # Gerar imagens
+N_TO_GENERATE = 5 # Gerar quantas imagens
+VIDEO = False # Fazer vídeo (nao implementado ainda)
+GENERATED_EPOCH_DISTANCE = 50 # Gerar imagem a cada quantas epochs
+LEARNING_RATE_GENERATOR = 1e-3
+LEARNING_RATE_DISCRIMINATOR = 1e-3
 WEIGHT_DECAY = 0 #0.001
-MIN_LEARNING_RATE = 9e-5
-PATIENCE_DECAY = 15
-BATCH_SIZES = [128, 128, 64, 64, 16, 8, 8, 8, 8] # 4 8 16 32 64 128 256 512 1024
-IMAGE_SIZE = 256
-CHANNELS_IMG = 3
-SIMULATED_STEP = 7
-Z_DIM = 256 # 512 no paper
-IN_CHANNELS = 256  # 512 no paper
-LAMBDA_GP = 20
-LAMBDA_LX = 0.01
-NUM_STEPS = int(log2(IMAGE_SIZE/4))
-PROGRESSIVE_EPOCHS = [60] * len(BATCH_SIZES) # Pra cada tamanho de imagem | 30 -> 4H numa GT 1030
+MIN_LEARNING_RATE = 5e-7
+PATIENCE_DECAY = 10 # Caso o scheduler esteja True, a cada x epochs ele será atualizado/reiniciado
+BATCH_SIZES = [64, 64, 64, 64, 16, 8, 2, 1, 1]
+IMAGE_SIZE = 128 # Tamanho da imagem de saida
+CHANNELS_IMG = 3 # Numero de canais da imagem
+SIMULATED_STEP = 7 # Quantidade de passos para gerar imagem. 2^(simulated_step + 1) = tamanho da imagem naquele momento
+Z_DIM = 256 # Tamanho do espaco latente do modelo
+W_DIM = 256 # Tamanho do espaço latente para os estilos
+IN_CHANNELS = 256  # Tamanho do input do modelo
+LAMBDA_GP = 8 # Valor para o multiplicador do Gradient Penalty
+NUM_STEPS = int(log2(IMAGE_SIZE/4)) 
+PROGRESSIVE_EPOCHS = [20,40,80,80,160,640,640] * len(BATCH_SIZES) # Epochs para cada tamanho de imagem 
 FIXED_NOISE = torch.randn(8, Z_DIM, 1, 1).to(DEVICE)
-NUM_WORKERS = int(os.cpu_count()/4) #Demora mto para carregar e o dataset n é grande pra valer a pena
+NUM_WORKERS = int(os.cpu_count()/4) #Numero de threads para carregar as imagens no dataset
 DIFF_AUGMENTATION = False
-RESTART_LEARNING = False
-RESTART_LEARNING_TIMEOUT = 20
 OPTMIZER = "ADAMW" # ADAM / NADAM / RMSPROP / ADAMAX / ADAMW / ADAMW8 / ADAGRAD / SGD / SWA / SAM / RADAM
-SCHEDULER = False
-STYLE = False
+SCHEDULER = True # Utilizar LearningRate Scheduler
+SCHEDULER_MULT = 1 # Multplier que utilizamos para separar cada "iteracao" do scheduler. ! Somente Ints !
+STYLE = True # Utilizar StyleGAN
 CREATE_MODEL_GRAPH = False
-SPECIAL_NUMBER = 1e-5
-CRITIC_TREAINING_STEPS = 1
-ACCUM_ITERATIONS = 5
+SPECIAL_NUMBER = 1e-5 # Evitar divisao por zero
+CRITIC_TREAINING_STEPS = 1 # A cada quantos steps treinar o critic
+ACCUM_ITERATIONS = 1 # Gradient acumulation - Quantas epochs acumular por gradient antes de fazer o backpropagation
 FOLDER_PATH = str(pathlib.Path().resolve())
-
-# 30 Progressive Epochs
-# 256 Z_DIM e IN_CHANNELS
-# 4x4 -> 4h numa GT 1030
-
-# 10 Progressive Epochs
-# 128 Z_DIM e IN_CHANNELS
-# 64x64 -> 8h 40m numa GT 1030

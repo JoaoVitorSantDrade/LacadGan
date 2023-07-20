@@ -13,7 +13,7 @@ from datetime import datetime
 import math
 
 IMAGE = False
-batchsize = 32
+batchsize = 128
 full_path = config.FOLDER_PATH + f"/Datasets/{config.DATASET}_aug/"
 
 def get_loader(image_size):
@@ -23,24 +23,24 @@ def get_loader(image_size):
             transforms.ToTensor(),
         ]
     )
-
-    
     dataset = datasets.ImageFolder(root=f"Datasets/{config.DATASET}", transform=transform)   
     loader = DataLoader(
         dataset,
         batch_size=batchsize,
         shuffle=True,
-        num_workers=0,
+        num_workers=config.NUM_WORKERS,
         pin_memory=True,
         drop_last=False,
+        prefetch_factor=32,
+        persistent_workers=True,
+        multiprocessing_context='spawn',
     )
     return loader, dataset
 
-
 transformation = torch.nn.Sequential(
     transforms.Normalize(
-            [0.1 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
-            [0.9 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
+            [0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
+            [0.5 for _ in range(config.CHANNELS_IMG)], #antes era 0.5
             ),
     transforms.RandomApply(
         (
@@ -49,7 +49,6 @@ transformation = torch.nn.Sequential(
             transforms.RandomVerticalFlip(),
         ]),
         transforms.RandomVerticalFlip(),
-        transforms.RandomErasing(scale=(0.01,0.04), ratio=(0.3,0.7)),
         ),
         p=0.5
     ),
@@ -59,18 +58,13 @@ transformation = torch.nn.Sequential(
             transforms.RandomHorizontalFlip(),
             transforms.RandomVerticalFlip(),
         ]),
-        transforms.RandomErasing(scale=(0.01,0.06), ratio=(0.3,0.9)),
         transforms.RandomHorizontalFlip(),
         ),
         p=0.5
     ),
-    transforms.RandomAutocontrast(),
-    transforms.RandomGrayscale(0.1),
-    transforms.RandomInvert(0.1)
 )
 
 pathlib.Path(full_path).mkdir(parents=True, exist_ok=True)
-
 
 if __name__ == "__main__":
     torch.backends.cudnn.enabled = True
@@ -80,6 +74,10 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.set_float32_matmul_precision('high')
+    torch.autograd.set_detect_anomaly(False)
+    torch.autograd.emit_nvtx = False
+    torch.set_num_threads(8)
+
     num_multiply = int(input("Number of times that you want to multiply your dataset: "))
     for step in range(int(math.log2(config.START_TRAIN_AT_IMG_SIZE/4)),config.SIMULATED_STEP):
 

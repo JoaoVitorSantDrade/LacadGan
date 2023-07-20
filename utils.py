@@ -74,14 +74,17 @@ def plot_cnns_tensorboard():
         writerGen.close()
         writerCritc.close()
         
-def gradient_penalty(critic, real, fake):
+def gradient_penalty(critic, real, fake, alpha = 0, step = 0):
     BATCH_SIZE, C, H, W = real.shape
     beta = torch.rand((BATCH_SIZE, 1, 1, 1)).repeat(1, C, H, W).to(config.DEVICE)
     interpolated_images = real * beta + fake.detach() * (1 - beta)
     interpolated_images.requires_grad_(True)
 
     # Calculate critic scores
-    mixed_scores = critic(interpolated_images)
+    if config.STYLE:
+        mixed_scores = critic(interpolated_images, alpha, step)
+    else:   
+        mixed_scores = critic(interpolated_images)
 
     # Take the gradient of the scores with respect to the images
     gradient = torch.autograd.grad(
@@ -94,7 +97,7 @@ def gradient_penalty(critic, real, fake):
 
     gradient = gradient.reshape((BATCH_SIZE, -1)) # Troquei para reshape | era view
     gradient_norm = gradient.norm(2, dim=1)
-    gradient_penalty = torch.nanmean((gradient_norm - 1) ** 2)
+    gradient_penalty = torch.mean((gradient_norm - 1) ** 2)
     return gradient_penalty
 
 def save_checkpoint(model, optimizer,scheduler=None, epoch=0, step=0, filename="my_checkpoint.pth.tar", dataset="default"):
@@ -117,7 +120,7 @@ def load_checkpoint(checkpoint_file, model, optimizer=None, epoch=0, step=0, sch
 
     caminho = config.FOLDER_PATH + "/saves/" + dataset + "/" + checkpoint_file
     try:
-        print(f"\n=> Loading checkpoint in {checkpoint_file}\n")
+        print(f"=> Loading checkpoint in {checkpoint_file}")
         checkpoint = torch.load(caminho, map_location="cuda")
         model.load_state_dict(checkpoint["state_dict"])
         if not inference:
@@ -126,7 +129,7 @@ def load_checkpoint(checkpoint_file, model, optimizer=None, epoch=0, step=0, sch
             step[0] = checkpoint["step"]
             if config.SCHEDULER:
                 scheduler.load_state_dict(checkpoint["scheduler"])
-        print(f"\n=> Success loading {checkpoint_file}\n")
+        print(f"=> Success loading {checkpoint_file}")
     except Exception as exp:
         print(f"=> No checkpoint found in {checkpoint_file} - {exp}")
    
@@ -161,15 +164,20 @@ def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
 
     for i in range(n):
         with torch.no_grad():
-            gen.set_alpha(alpha)
-            gen.set_step(steps)
+            if not config.STYLE:
+                gen.set_alpha(alpha)
+                gen.set_step(steps)
 
             if config.VIDEO:
                 noise = config.FIXED_NOISE[0]
                 img = gen(noise)
             else:
-                noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float16)
-                img = gen(noise)
+                noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
+                noise = noise.to(memory_format=torch.channels_last)
+                if config.STYLE:
+                    img = gen(noise, alpha, steps)
+                else:
+                    img = gen(noise)
 
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 

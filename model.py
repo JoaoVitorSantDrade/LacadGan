@@ -7,6 +7,14 @@ import config
 
 factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
 
+class PrintLayer(nn.Module):
+    def __init__(self):
+        super(PrintLayer,self).__init__()
+
+    def forward(self, x):
+        print(x.shape)
+        return x
+
 class WSLinear(nn.Module):
     def __init__(
         self, in_features, out_features
@@ -21,7 +29,9 @@ class WSLinear(nn.Module):
         nn.init.zeros_(self.bias)
 
     def forward(self,x):
-        return self.linear(x * self.scale) + self.bias
+        x = x * self.scale
+        
+        return self.linear(x) + self.bias
         
 class WSConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3,stride=1,padding=1,gain=2):
@@ -52,56 +62,58 @@ class ConvBlock(nn.Module):
         self.conv1 = WSConv2d(in_channels, out_channels)
         self.conv2 = WSConv2d(out_channels, out_channels)
         self.noise = injectNoise(out_channels)
-        self.drop1 = nn.Dropout(0.3)
-        self.leaky1 = nn.PReLU()
-        self.leaky2 = nn.PReLU()
+        self.drop1 = nn.Dropout(0.2)
+        self.leaky = nn.LeakyReLU()
         self.pn = PixelNorm()
         self.use_pn = use_pixelnorm
         self.use_noise = use_noise
 
     def forward(self, x):
-        x = self.pn(x) if self.use_pn else x
-        x = self.conv1(x)
-        x = self.noise(x) if self.use_noise else x
-        x = self.leaky1(self.drop1(self.conv2(x)))
-        x = self.leaky2(self.conv2(x))
-        x = self.pn(x) if self.use_pn else x
-
-        return x
+        out = self.pn(x) if self.use_pn else x
+        out = self.leaky(self.conv1(out))
+        out = self.noise(out) if self.use_noise else out
+        out = self.leaky(self.conv2(out))
+        out = self.drop1(out)
+        return out
 
 class MappingNetwork(nn.Module):
     def __init__(self, z_dim, w_dim):
         super().__init__()
         self.mapping = nn.Sequential(
+            nn.Flatten(),
             PixelNorm(),
-            nn.Linear(z_dim, w_dim),
+            WSLinear(z_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
             nn.ReLU(),
-            nn.Linear(w_dim, w_dim),
+            WSLinear(w_dim, w_dim),
         )
     
     def forward(self,x):
         return self.mapping(x)
 
 class AdaIN(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels, w_dim):
         super().__init__()
         self.instance_norm = nn.InstanceNorm2d(channels)
+        self.style_scale   = WSLinear(w_dim, channels)
+        self.style_bias    = WSLinear(w_dim, channels)
 
-    def forward(self,x): # removi o w
+    def forward(self,x,w):
         x = self.instance_norm(x)
-        return x
+        style_scale = self.style_scale(w).unsqueeze(2).unsqueeze(3)
+        style_bias  = self.style_bias(w).unsqueeze(2).unsqueeze(3)
+        return style_scale * x + style_bias
 
 class injectNoise(nn.Module):
     def __init__(self, channels):
@@ -113,18 +125,18 @@ class injectNoise(nn.Module):
         return x + self.weight + noise
 
 class GenBlock(nn.Module):
-    def __init__(self, in_channel, out_channel):
+    def __init__(self, in_channel, out_channel, w_dim):
         super(GenBlock, self).__init__()
         self.conv1 = WSConv2d(in_channel, out_channel)
         self.conv2 = WSConv2d(out_channel, out_channel)
-        self.leaky = nn.LeakyReLU(0.2, inplace=True)
+        self.leaky = nn.LeakyReLU(0.2)
         self.inject_noise1 = injectNoise(out_channel)
         self.inject_noise2 = injectNoise(out_channel)
-        self.adain1 = AdaIN(out_channel)
-        self.adain2 = AdaIN(out_channel)
-    def forward(self, x): #removi o w
-        x = self.adain1(self.leaky(self.inject_noise1(self.conv1(x)))) #self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
-        x = self.adain2(self.leaky(self.inject_noise2(self.conv2(x)))) #self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
+        self.adain1 = AdaIN(out_channel, w_dim)
+        self.adain2 = AdaIN(out_channel, w_dim)
+    def forward(self, x,w):
+        x = self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
+        x = self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
         return x
 
 class StyleGenerator(nn.Module):
@@ -137,7 +149,7 @@ class StyleGenerator(nn.Module):
         self.initial_noise1 = injectNoise(in_channels)
         self.initial_noise2 = injectNoise(in_channels)
         self.initial_conv   = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
-        self.leaky          = nn.LeakyReLU(0.2, inplace=True)
+        self.leaky          = nn.LeakyReLU(0.2)
 
         self.initial_rgb    = WSConv2d(
             in_channels, img_channels, kernel_size = 1, stride=1, padding=0
@@ -158,7 +170,7 @@ class StyleGenerator(nn.Module):
 
     def forward(self, noise, alpha, steps):
         w = self.map(noise)
-        x = self.initial_adain1(self.initial_noise1(self.starting_cte),w)
+        x = self.initial_adain1(self.initial_noise1(self.starting_cte), w)
         x = self.initial_conv(x)
         out = self.initial_adain2(self.leaky(self.initial_noise2(x)), w)
 
@@ -293,7 +305,7 @@ class StyleDiscriminator(nn.Module):
         for i in range(len(factors) - 1, 0, -1):
             conv_in = int(in_channels * factors[i])
             conv_out = int(in_channels * factors[i - 1])
-            self.prog_blocks.append(ConvBlock(conv_in, conv_out))
+            self.prog_blocks.append(ConvBlock(conv_in, conv_out, use_pixelnorm=False))
             self.rgb_layers.append(
                 WSConv2d(img_channels, conv_in, kernel_size=1, stride=1, padding=0)
             )
@@ -364,38 +376,19 @@ class StyleDiscriminator(nn.Module):
 
         out = self.minibatch_std(out)
         return self.final_block(out).view(out.shape[0], -1)
-
-class BiLSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_classes):
-        super(BiLSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.fc = nn.Linear(2 * hidden_size, num_classes)
     
-    def forward(self, x):
-        h0 = torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
-        c0 = torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
-        out, (hn, cn) = self.lstm(x, (h0, c0))
-        out = self.fc(torch.cat((out[-2,:,:], out[-1,:,:]), dim=1))
-        return out
-
 if __name__ == "__main__":
-    Z_DIM = 32
-    IN_CHANNELS = 32
-    gen = Generator(Z_DIM,IN_CHANNELS,img_channels=3)
-    disc = Discriminator(IN_CHANNELS, img_channels=3)
+    Z_DIM = 128
+    IN_CHANNELS = 256
+    W_DIM = 32
+    gen = StyleGenerator(Z_DIM,W_DIM,IN_CHANNELS,img_channels=3)
+    disc = StyleDiscriminator(IN_CHANNELS, img_channels=3)
 
-    for img_size in [4, 8, 16, 32, 64, 128, 256, 512, 1024]:
-        num_steps = int(log2(img_size / 4))
+    for step,img_size in enumerate([4, 8, 16, 32, 64, 128, 256, 512, 1024]):
         x = torch.randn((1, Z_DIM, 1 ,1))
-        gen.set_alpha(0.5)
-        gen.set_step(num_steps)
-        z = gen(x)
+        z = gen(x, 1, step)
         assert z.shape == (1, 3, img_size, img_size)
-        disc.set_step(num_steps)
-        disc.set_alpha(0.5)
-        disc.forward(z)
-        out = disc(z)
+        disc.forward(z, 1 , step)
+        out = disc(z, 1 , step)
         assert out.shape == (1,1)
-        print(f"Success! At img size: {img_size}")
+        print(f"Success! At img size: {img_size} - step: {step}")
