@@ -1,0 +1,13 @@
+matplotlib==3.5.2
+numpy==1.23.5
+opencv_python==4.6.0.66
+scikit_learn==1.1.1
+scipy==1.8.1
+tb_nightly==2.14.0a20230530
+torch==2.1.0.dev20230720+cu121
+torchcontrib==0.0.2
+torchmetrics==0.11.0
+torchvision==0.16.0.dev20230720+cu121
+tqdm==4.64.0
+wakepy==0.6.0
+~orch==2.0.0+cu118
