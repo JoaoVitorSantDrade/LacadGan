@@ -21,7 +21,10 @@ def calculate_fid(true_images,false_images):
 
     fid.update(true_images,True)
     fid.update(false_images,False)
-    return fid.compute()
+    fid_score = fid.compute()
+
+    with open('fid_score.txt','a') as f:
+        f.write(f"FID: {fid_score.item()}\n")
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(
