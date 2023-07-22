@@ -28,9 +28,9 @@ BATCH_SIZES = [64, 64, 64, 64, 16, 8, 2, 1, 1]
 IMAGE_SIZE = 128 # Tamanho da imagem de saida
 CHANNELS_IMG = 3 # Numero de canais da imagem
 SIMULATED_STEP = 7 # Quantidade de passos para gerar imagem. 2^(simulated_step + 1) = tamanho da imagem naquele momento
-Z_DIM = 256 # Tamanho do espaco latente do modelo
-W_DIM = 256 # Tamanho do espaço latente para os estilos
-IN_CHANNELS = 256  # Tamanho do input do modelo
+Z_DIM = 64 # Tamanho do espaco latente do modelo
+W_DIM = 64 # Tamanho do espaço latente para os estilos
+IN_CHANNELS = 64  # Tamanho do input do modelo
 LAMBDA_GP = 8 # Valor para o multiplicador do Gradient Penalty
 NUM_STEPS = int(log2(IMAGE_SIZE/4)) 
 PROGRESSIVE_EPOCHS = [20,40,80,80,160,640,640] * len(BATCH_SIZES) # Epochs para cada tamanho de imagem 
@@ -46,3 +46,4 @@ SPECIAL_NUMBER = 1e-5 # Evitar divisao por zero
 CRITIC_TREAINING_STEPS = 1 # A cada quantos steps treinar o critic
 ACCUM_ITERATIONS = 1 # Gradient acumulation - Quantas epochs acumular por gradient antes de fazer o backpropagation
 FOLDER_PATH = str(pathlib.Path().resolve())
+FID = True # Calcular o FID

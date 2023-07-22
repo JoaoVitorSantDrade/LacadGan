@@ -11,7 +11,17 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from model import Discriminator, Generator
 import shutil
+from torchmetrics.image.fid import FrechetInceptionDistance
 
+fid = FrechetInceptionDistance(feature=config.Z_DIM).cuda()
+
+def calculate_fid(true_images,false_images):
+    true_images = true_images.to(torch.uint8)
+    false_images = false_images.to(torch.uint8)
+
+    fid.update(true_images,True)
+    fid.update(false_images,False)
+    return fid.compute()
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(

@@ -19,7 +19,8 @@ from utils import (
     load_checkpoint,
     generate_examples,
     plot_cnns_tensorboard,
-    remove_graphs
+    remove_graphs,
+    calculate_fid
 )
 from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
 from math import log2
@@ -27,7 +28,6 @@ from tqdm import tqdm
 import config
 import warnings
 from torchcontrib.optim import SWA
-
 
 def load_tensor(x): 
         """
@@ -167,6 +167,9 @@ def train_fn(
                 plot_thread.start()
             tensorboard_step += 1
 
+    if config.FID:
+        FID_Score = calculate_fid(real,fake).item()
+            
     if config.SCHEDULER:
         scheduler_gen.step()
         scheduler_disc.step()
@@ -177,8 +180,8 @@ def train_fn(
         opt_gen.swap_swa_sgd()
 
     
-  
-    print(f"Gradient Penalty: {gp.detach()}\tAlpha: {alpha}\nScheduler: Critic({scheduler_disc.get_lr()[0]}) - Gen({scheduler_gen.get_lr()[0]})")
+    
+    print(f"Gradient Penalty: {gp.detach()}\tAlpha: {alpha}\nScheduler: {scheduler_gen.get_lr()[0]}\tFID: {FID_Score}")
     return tensorboard_step, alpha
 
 def main():
@@ -293,6 +296,8 @@ def main():
 
 
     images_saw = 0
+    
+
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         loader, dataset = get_loader(4*2**step)
