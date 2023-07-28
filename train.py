@@ -28,6 +28,7 @@ from tqdm import tqdm
 import config
 import warnings
 from torchcontrib.optim import SWA
+from torchmetrics.image.fid import FrechetInceptionDistance
 
 def load_tensor(x): 
         """
@@ -53,7 +54,7 @@ def get_loader(image_size):
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False, # True
         num_workers=config.NUM_WORKERS,
         pin_memory=True,
         drop_last=True,
@@ -79,6 +80,7 @@ def train_fn(
     scheduler_gen,
     scheduler_disc,
     now,
+    fid
     ):
 
     all_step = len(loader)    
@@ -168,7 +170,7 @@ def train_fn(
             tensorboard_step += 1
 
     if config.FID:
-        FID_Score = calculate_fid(real,fake).item()
+        FID_Score = calculate_fid(real,fake,fid).item()
             
     if config.SCHEDULER:
         scheduler_gen.step()
@@ -200,6 +202,8 @@ def main():
         if config.CREATE_MODEL_GRAPH:
             plot_cnns_tensorboard()
             config.CREATE_MODEL_GRAPH = False
+
+    fid = FrechetInceptionDistance().cuda()
 
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:
@@ -328,6 +332,7 @@ def main():
                 schedulerGen,
                 schedulerDisc,
                 now,
+                fid
             )
 
 
@@ -377,7 +382,8 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('medium')
     torch.autograd.set_detect_anomaly(False)
     torch.autograd.emit_nvtx = False
-    torch.set_num_threads(4)
+    torch.set_num_threads(2)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
     with keepawake(keep_screen_awake=False):
         warnings.filterwarnings("ignore")

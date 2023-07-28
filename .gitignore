@@ -8,3 +8,4 @@ epoch_step.txt
 critic.pth
 generator.pth
 saves
+fid_score.txt
