@@ -29,6 +29,10 @@ import config
 import warnings
 from torchcontrib.optim import SWA
 from torchmetrics.image.fid import FrechetInceptionDistance
+from pytorch_wavelets import DWTForward, DWTInverse
+
+
+mem_format = torch.channels_last if config.CHANNEL_LAST == True else torch.contiguous_format
 
 def load_tensor(x): 
         """
@@ -54,11 +58,11 @@ def get_loader(image_size):
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False, # True
+        shuffle=True, # True
         num_workers=config.NUM_WORKERS,
         pin_memory=True,
-        drop_last=True,
-        prefetch_factor=32,
+        drop_last=False,
+        prefetch_factor=16,
         persistent_workers=True,
         multiprocessing_context='spawn',
     )
@@ -97,7 +101,7 @@ def train_fn(
         real = real.cuda() #Passa as imagens p/ Cuda
         # Train Disc
         with torch.cuda.amp.autocast():
-            real = real.to(memory_format=torch.channels_last) # Converte as imagens para Channel Last 
+            real = real.to(memory_format=mem_format) # Converte as imagens para Channel Last 
             # https://docs.fast.ai/callback.channelslast.html 
             # https://www.intel.com/content/www/us/en/developer/articles/technical/pytorch-vision-models-with-channels-last-on-cpu.html 
             # https://docs.nvidia.com/deeplearning/performance/dl-performance-convolutional/index.html#tensor-layout
@@ -105,28 +109,33 @@ def train_fn(
             cur_batch_size = real.shape[0]
 
             noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1,device=torch.device('cuda'))
-            noise = noise.to(memory_format=torch.channels_last)
+            noise = noise.to(memory_format=mem_format)
 
-            if config.STYLE:
-                fake = gen(noise,alpha,step)
-            else:
-                fake = gen(noise) # Gera imagens falsas
+            match config.MODEL:
+                case "Style":
+                    noise = DWTForward(wave="haar")(noise)
+                    fake = gen(noise,alpha,step)
+                case "Pro":
+                    fake = gen(noise) # Gera imagens falsas
+                case "Wavelet":
+                    fake = gen(noise,alpha,step)
+
             
             if config.DIFF_AUGMENTATION:
                 fake = DfAg.DiffAugment(fake)
                 real = DfAg.DiffAugment(real)
 
-            if config.STYLE:
-                disc_real = disc(real,alpha,step) #True Positives/Negatives
-                disc_fake = disc(fake.detach(),alpha,step) #False Positives/Negatives
-            else:
-                disc_real = disc(real) #True Positives/Negatives
-                disc_fake = disc(fake.detach()) #False Positives/Negatives
+            match config.MODEL:
+                case "Style":
+                    disc_real = disc(real,alpha,step) #True Positives/Negatives
+                    disc_fake = disc(fake.detach(),alpha,step) #False Positives/Negatives
+                    gp = gradient_penalty(disc, real, fake, alpha, step) # Calcula gradient Penalty
+
+                case "Pro":
+                    disc_real = disc(real) #True Positives/Negatives
+                    disc_fake = disc(fake.detach()) #False Positives/Negatives
+                    gp = gradient_penalty(disc, real, fake) # Calcula gradient Penalty
             
-            if config.STYLE:
-                gp = gradient_penalty(disc, real, fake, alpha, step) # Calcula gradient Penalty
-            else:
-                gp = gradient_penalty(disc, real, fake) # Calcula gradient Penalty
             #https://paperswithcode.com/method/wgan-gp#:~:text=weight%20clipping%20parameter%20.-,A%20Gradient%20Penalty%20is%20a%20soft%20version%20of%20the%20Lipschitz,used%20as%20the%20gradient%20penalty.
             
             loss_disc = (
@@ -141,10 +150,12 @@ def train_fn(
 
         if batch_idx % config.CRITIC_TREAINING_STEPS == 0:
             # Train Gen
-            if config.STYLE:
-                gen_fake = disc(fake,alpha,step)
-            else:
-                gen_fake = disc(fake)
+            match config.MODEL:
+                case "Style":
+                    gen_fake = disc(fake,alpha,step)
+                case "Pro":
+                    gen_fake = disc(fake)
+
             loss_gen = -torch.nanmean(gen_fake)
             
             
@@ -155,16 +166,19 @@ def train_fn(
         alpha += cur_batch_size / ((len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.20))
         alpha = min(alpha, 1)
 
-        if not config.STYLE:
-            gen.set_alpha(alpha)
-            disc.set_alpha(alpha)
+        match config.MODEL:
+            case "Pro":
+                gen.set_alpha(alpha)
+                disc.set_alpha(alpha)
 
-        if batch_idx  % 200 == 0 and config.TENSORBOARD:    
+        if batch_idx  % 50 == 0 and config.TENSORBOARD:    
             with torch.no_grad(): # Plotar no tensorboard
-                if config.STYLE:
-                    fixed_fakes = gen(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
-                else:
-                    fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
+                match config.MODEL:
+                    case "Style":
+                        fixed_fakes = gen(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
+                    case "Pro":
+                        fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
+
                 plot_thread = Thread(target=plot_to_tensorboard, args=(writer, loss_disc.detach(), loss_gen.detach(), real.detach(), fixed_fakes.detach(), tensorboard_step, now, gen, disc, gp,), daemon=True)
                 plot_thread.start()
             tensorboard_step += 1
@@ -183,7 +197,7 @@ def train_fn(
 
     
     
-    print(f"Gradient Penalty: {gp.detach()}\tAlpha: {alpha}\nScheduler: {scheduler_gen.get_lr()[0]}\tFID: {FID_Score}")
+    print(f"Gradient Penalty: {gp.detach()}\tAlpha: {alpha}\nScheduler: {scheduler_gen.get_lr()[0]}")
     return tensorboard_step, alpha
 
 def main():
@@ -192,18 +206,23 @@ def main():
     print(f"Versão do PyTorch: {torch.__version__}\nGPU utilizada: {torch.cuda.get_device_name(torch.cuda.current_device())}\nDataset: {config.DATASET}\nData-Horario: {now.strftime('%d/%m/%Y - %H:%M:%S')}")
     print(f"CuDNN: {torch.backends.cudnn.version()}\n")
     tensorboard_step = 0
+    match config.MODEL:
+        case "Style":
+            gen = StyleGenerator(config.Z_DIM, config.W_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
+            disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
+        case "Pro":
+            gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
+            disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True,memory_format = mem_format)
+        case "Wavelet":
+            gen = WaveGenerator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
+            disc = WaveDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True,memory_format = mem_format)
+          
+    if config.CREATE_MODEL_GRAPH:
+        plot_cnns_tensorboard()
 
-    if config.STYLE:
-        gen = StyleGenerator(config.Z_DIM, config.W_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
-        disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
-    else:
-        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
-        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format=torch.channels_last)
-        if config.CREATE_MODEL_GRAPH:
-            plot_cnns_tensorboard()
-            config.CREATE_MODEL_GRAPH = False
-
-    fid = FrechetInceptionDistance().cuda()
+    fid = ""
+    if config.FID:
+        fid = FrechetInceptionDistance().cuda()
 
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:
@@ -244,8 +263,9 @@ def main():
         case "ADAMW8":
             if os.name == 'nt':
                 raise NotImplementedError("ADAMW8 do not work on Windows")
-            baseGen = bnb.optim.AdamW8bit(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
-            baseDisc = bnb.optim.AdamW8bit(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)        
+            else:
+                baseGen = bnb.optim.AdamW8bit(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)
+                baseDisc = bnb.optim.AdamW8bit(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99), weight_decay=config.WEIGHT_DECAY)        
         case "RADAM":
             opt_gen = optim.RAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.RAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
@@ -307,11 +327,13 @@ def main():
         loader, dataset = get_loader(4*2**step)
         img_size = 4*2**step
         
-        if not config.STYLE:
-            gen.set_alpha(alpha)
-            gen.set_step(step)
-            disc.set_alpha(alpha)
-            disc.set_step(step)
+        match config.MODEL:
+            case "Pro":
+                gen.set_alpha(alpha)
+                gen.set_step(step)
+                disc.set_alpha(alpha)
+                disc.set_step(step)
+
         for epoch in range(cur_epoch,num_epochs):
             gen.train()
             disc.train()
@@ -364,9 +386,10 @@ def main():
                     print(f"Erro: {err}")
 
         "requires_grad = false em todas camadas que já treinou"
-        for module_name, module in gen.named_modules():
-            if f"prog_blocks.{step}" in module_name:
-                module.require_grad = False
+        if config.PAUSE_LAYERS:
+            for module_name, module in gen.named_modules():
+                if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
+                    module.require_grad = False
 
         step += 1
         cur_epoch = 0

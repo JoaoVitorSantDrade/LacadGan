@@ -1,11 +1,10 @@
-from sklearn.neighbors import NearestNeighbors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from math import log2;
 import config
-
-factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
+import wavelet as wave
+factors = [1, 1, 1, 1, 1, 1, 1, 1, 1] #factors = [1, 1, 1, 1, 1/2, 1/4, 1/8, 1/16, 1/32]
 
 class PrintLayer(nn.Module):
     def __init__(self):
@@ -24,6 +23,7 @@ class WSLinear(nn.Module):
         self.scale  = (2/in_features) ** 0.5
         self.bias   = self.linear.bias
         self.linear.bias = None
+
 
         nn.init.normal_(self.linear.weight)
         nn.init.zeros_(self.bias)
@@ -124,6 +124,7 @@ class injectNoise(nn.Module):
         noise = torch.randn((x.shape[0], 1, x.shape[2], x.shape[3]), device = x.device)
         return x + self.weight + noise
 
+
 class GenBlock(nn.Module):
     def __init__(self, in_channel, out_channel, w_dim):
         super(GenBlock, self).__init__()
@@ -131,12 +132,12 @@ class GenBlock(nn.Module):
         self.conv2 = WSConv2d(out_channel, out_channel)
         self.leaky = nn.LeakyReLU(0.2)
         self.inject_noise1 = injectNoise(out_channel)
-        self.inject_noise2 = injectNoise(out_channel)
         self.adain1 = AdaIN(out_channel, w_dim)
         self.adain2 = AdaIN(out_channel, w_dim)
+ 
     def forward(self, x,w):
         x = self.adain1(self.leaky(self.inject_noise1(self.conv1(x))), w)
-        x = self.adain2(self.leaky(self.inject_noise2(self.conv2(x))), w)
+        x = self.adain2(self.leaky(self.conv2(x)), w)
         return x
 
 class StyleGenerator(nn.Module):
@@ -180,7 +181,6 @@ class StyleGenerator(nn.Module):
         for step in range(steps):
             upscaled = F.interpolate(out, scale_factor=2, mode = 'bilinear')
             out      = self.prog_blocks[step](upscaled,w)
-
         final_upscaled = self.rgb_layers[steps-1](upscaled)
         final_out      = self.rgb_layers[steps](out)
 

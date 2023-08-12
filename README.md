@@ -50,3 +50,17 @@ Quanto maior o learning rate, maiores são as features que ele captura. Irei tes
 
 https://www.casualganpapers.com/page/6/
 https://github.com/LACAD/gan-amiloisose.git
+PhD thesis, chapter 3: https://doi.org/10.17863/CAM.53748.
+
+https://arxiv.org/pdf/2102.06108.pdf
+https://arxiv.org/pdf/2103.11093.pdf
+https://arxiv.org/pdf/2210.09655.pdf
+https://arxiv.org/pdf/1812.04948.pdf
+https://arxiv.org/pdf/1704.00028.pdf
+https://pytorch.org/tutorials/intermediate/memory_format_tutorial.html
+https://arxiv.org/pdf/2103.04922.pdf
+https://arxiv.org/pdf/2102.07074.pdf
+https://arxiv.org/pdf/1710.10196.pdf
+https://arxiv.org/pdf/1904.03189.pdf
+https://ieeexplore.ieee.org/document/8721631
+https://torchmetrics.readthedocs.io/en/stable/image/kernel_inception_distance.html

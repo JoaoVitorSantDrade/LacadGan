@@ -31,7 +31,7 @@ def get_loader(image_size):
         num_workers=config.NUM_WORKERS,
         pin_memory=True,
         drop_last=False,
-        prefetch_factor=32,
+        prefetch_factor=4,
         persistent_workers=True,
         multiprocessing_context='spawn',
     )
@@ -73,10 +73,10 @@ if __name__ == "__main__":
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
     torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('medium')
     torch.autograd.set_detect_anomaly(False)
     torch.autograd.emit_nvtx = False
-    torch.set_num_threads(8)
+    torch.set_num_threads(4)
 
     num_multiply = int(input("Number of times that you want to multiply your dataset: "))
     for step in range(int(math.log2(config.START_TRAIN_AT_IMG_SIZE/4)),config.SIMULATED_STEP):

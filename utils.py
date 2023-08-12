@@ -69,17 +69,11 @@ def remove_graphs():
                 file_path = pathlib.Path.joinpath(path,files)
                 shutil.rmtree(file_path)
 
-def plot_cnns_tensorboard():
+def plot_cnns_tensorboard(gen, disc):
 
     for step in range(config.SIMULATED_STEP):
         writerGen = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_gen")
         writerCritc = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_critic") 
-        gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
-        gen.set_alpha(0.5)
-        gen.set_step(step+1)
-        disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE)
-        disc.set_alpha(0.5)
-        disc.set_step(step+1)
         with torch.no_grad():
             writerGen.add_graph(gen,config.FIXED_NOISE,verbose = False, use_strict_trace=False)
             writerCritc.add_graph(disc,gen(config.FIXED_NOISE),verbose = False, use_strict_trace=False)
@@ -95,10 +89,11 @@ def gradient_penalty(critic, real, fake, alpha = 0, step = 0):
     interpolated_images.requires_grad_(True)
 
     # Calculate critic scores
-    if config.STYLE:
-        mixed_scores = critic(interpolated_images, alpha, step)
-    else:   
-        mixed_scores = critic(interpolated_images)
+    match config.MODEL:
+        case "Style":
+            mixed_scores = critic(interpolated_images, alpha, step)
+        case "Pro":
+            mixed_scores = critic(interpolated_images)
 
     # Take the gradient of the scores with respect to the images
     gradient = torch.autograd.grad(
@@ -178,9 +173,10 @@ def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
 
     for i in range(n):
         with torch.no_grad():
-            if not config.STYLE:
-                gen.set_alpha(alpha)
-                gen.set_step(steps)
+            match config.MODEL:
+                case "Pro":
+                    gen.set_alpha(alpha)
+                    gen.set_step(steps)
 
             if config.VIDEO:
                 noise = config.FIXED_NOISE[0]
@@ -188,10 +184,11 @@ def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
             else:
                 noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
                 noise = noise.to(memory_format=torch.channels_last)
-                if config.STYLE:
-                    img = gen(noise, alpha, steps)
-                else:
-                    img = gen(noise)
+                match config.MODEL:
+                    case "Style":
+                        img = gen(noise, alpha, steps)
+                    case "Pro":
+                        img = gen(noise)
 
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 
