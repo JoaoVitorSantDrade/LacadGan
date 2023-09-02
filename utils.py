@@ -9,8 +9,9 @@ from torchvision.utils import save_image
 from scipy.stats import truncnorm
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
-from model import Discriminator, Generator
+from model import get_w, get_noise
 import shutil
+from math import log2
 
 
 
@@ -69,20 +70,22 @@ def remove_graphs():
                 file_path = pathlib.Path.joinpath(path,files)
                 shutil.rmtree(file_path)
 
-def plot_cnns_tensorboard(gen, disc):
+def plot_cnns_tensorboard(gen, disc, noise, weight=None):
 
     for step in range(config.SIMULATED_STEP):
         writerGen = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_gen")
-        writerCritc = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_critic") 
+        writerCritc = SummaryWriter(f"logs/LacadGan/{2**(step+1) * 4}x{2**(step+1) * 4}_critic")
+        gen.eval()
+        disc.eval()
         with torch.no_grad():
-            writerGen.add_graph(gen,config.FIXED_NOISE,verbose = False, use_strict_trace=False)
-            writerCritc.add_graph(disc,gen(config.FIXED_NOISE),verbose = False, use_strict_trace=False)
-        del gen
-        del disc
+            writerGen.add_graph(gen,weight, noise,verbose = False, use_strict_trace=False)
+            writerCritc.add_graph(disc,gen(weight, noise),verbose = False, use_strict_trace=False)
         writerGen.close()
         writerCritc.close()
+        gen.train()
+        disc.train()
         
-def gradient_penalty(critic, real, fake, alpha = 0, step = 0):
+def gradient_penalty(critic, real, fake):
     BATCH_SIZE, C, H, W = real.shape
     beta = torch.rand((BATCH_SIZE, 1, 1, 1)).repeat(1, C, H, W).to(config.DEVICE)
     interpolated_images = real * beta + fake.detach() * (1 - beta)
@@ -91,7 +94,7 @@ def gradient_penalty(critic, real, fake, alpha = 0, step = 0):
     # Calculate critic scores
     match config.MODEL:
         case "Style":
-            mixed_scores = critic(interpolated_images, alpha, step)
+            mixed_scores = critic(interpolated_images)
         case "Pro":
             mixed_scores = critic(interpolated_images)
 
@@ -116,8 +119,9 @@ def save_checkpoint(model, optimizer,scheduler=None, epoch=0, step=0, filename="
         "step": step,
         "state_dict": model.state_dict(),
         "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
     }
+    if scheduler is not None:
+        checkpoint.update({"scheduler":scheduler})
     try:
         torch.save(checkpoint, caminho)
     except:
@@ -153,7 +157,8 @@ def seed_everything(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
+
+def generate_examples(gen, mapping_network, steps, n=1000,epoch=0,size=0,name="default"):
     truncation = 0.7
     caminho = config.FOLDER_PATH + "/saves/" + name
     if size < 10:
@@ -181,14 +186,16 @@ def generate_examples(gen, steps, n=1000,epoch=0,size=0,name="default"):
             if config.VIDEO:
                 noise = config.FIXED_NOISE[0]
                 img = gen(noise)
-            else:
-                noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
-                noise = noise.to(memory_format=torch.channels_last)
-                match config.MODEL:
-                    case "Style":
-                        img = gen(noise, alpha, steps)
-                    case "Pro":
-                        img = gen(noise)
+
+            match config.MODEL:
+                case "Style":
+                    w     = get_w(1, mapping_network)
+                    noise = get_noise(1)
+                    img = gen(w, noise)
+                case "Pro":
+                    noise = torch.tensor(truncnorm.rvs(-truncation, truncation, size=(1, config.Z_DIM, 1, 1)), device=config.DEVICE, dtype=torch.float32)
+                    noise = noise.to(memory_format=torch.channels_last)
+                    img = gen(noise)
 
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
 

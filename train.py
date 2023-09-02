@@ -22,7 +22,7 @@ from utils import (
     remove_graphs,
     calculate_fid
 )
-from model import Discriminator, Generator, StyleDiscriminator, StyleGenerator
+from model import Discriminator, Generator, MappingNetwork, get_noise, get_w, PathLengthPenalty, WaveDiscriminator, WaveGenerator
 from math import log2
 from tqdm import tqdm
 import config
@@ -69,122 +69,127 @@ def get_loader(image_size):
     return loader, dataset
 
 def train_fn(
-    disc,
+    critic,
     gen,
+    map,
+    path_length_penalty,
     loader,
     dataset,
     step,
     alpha,
-    opt_disc,
+    opt_critic,
     opt_gen,
+    opt_map,
     tensorboard_step,
     writer,
     scaler_gen,
-    scaler_disc,
+    scaler_critic,
+    scaler_map,
     scheduler_gen,
     scheduler_disc,
     now,
     fid
     ):
+    # TODO: Como nao eh mais progressive epochs, devemos arrumar na Main o loop de treinamento
 
-    all_step = len(loader)    
-    loop = tqdm(loader, leave=True, unit_scale=True, smoothing=1.0, colour="cyan", ncols=80, desc="batch training")
+    loop = tqdm(loader, leave=True, unit_scale=True, smoothing=1.0, colour="cyan", ncols=200, desc="Batch training")
     loss_gen = 0
     for batch_idx, (real, _) in enumerate(loop):
         # imagens por segundo batch_size * it
 
-        # Zera os gradientes
-        opt_disc.zero_grad(set_to_none = True)
-        opt_gen.zero_grad(set_to_none = True) 
-
         cur_batch_size = 0
         real = real.cuda() #Passa as imagens p/ Cuda
+
         # Train Disc
-        with torch.cuda.amp.autocast():
-            real = real.to(memory_format=mem_format) # Converte as imagens para Channel Last 
+        
+        real = real.to(memory_format=mem_format) # Converte as imagens para Channel Last 
             # https://docs.fast.ai/callback.channelslast.html 
             # https://www.intel.com/content/www/us/en/developer/articles/technical/pytorch-vision-models-with-channels-last-on-cpu.html 
             # https://docs.nvidia.com/deeplearning/performance/dl-performance-convolutional/index.html#tensor-layout
 
-            cur_batch_size = real.shape[0]
+        cur_batch_size = real.shape[0]
 
-            noise = torch.randn(cur_batch_size, config.Z_DIM, 1, 1,device=torch.device('cuda'))
-            noise = noise.to(memory_format=mem_format)
-
-            match config.MODEL:
-                case "Style":
-                    noise = DWTForward(wave="haar")(noise)
-                    fake = gen(noise,alpha,step)
-                case "Pro":
-                    fake = gen(noise) # Gera imagens falsas
-                case "Wavelet":
-                    fake = gen(noise,alpha,step)
-
-            
-            if config.DIFF_AUGMENTATION:
-                fake = DfAg.DiffAugment(fake)
-                real = DfAg.DiffAugment(real)
-
-            match config.MODEL:
-                case "Style":
-                    disc_real = disc(real,alpha,step) #True Positives/Negatives
-                    disc_fake = disc(fake.detach(),alpha,step) #False Positives/Negatives
-                    gp = gradient_penalty(disc, real, fake, alpha, step) # Calcula gradient Penalty
-
-                case "Pro":
-                    disc_real = disc(real) #True Positives/Negatives
-                    disc_fake = disc(fake.detach()) #False Positives/Negatives
-                    gp = gradient_penalty(disc, real, fake) # Calcula gradient Penalty
-            
+        w     = get_w(cur_batch_size, map)
+        noise = get_noise(cur_batch_size)
+        with torch.cuda.amp.autocast(dtype=torch.float32):
             #https://paperswithcode.com/method/wgan-gp#:~:text=weight%20clipping%20parameter%20.-,A%20Gradient%20Penalty%20is%20a%20soft%20version%20of%20the%20Lipschitz,used%20as%20the%20gradient%20penalty.
-            
-            loss_disc = (
-                -(torch.mean(disc_real) - torch.mean(disc_fake))
-                + config.LAMBDA_GP * gp
-                + (0.01 * torch.mean(disc_real ** 2)) 
-            )
-
-        scaler_disc.scale(loss_disc).backward()
-        scaler_disc.step(opt_disc)
-        scaler_disc.update()
-
-        if batch_idx % config.CRITIC_TREAINING_STEPS == 0:
-            # Train Gen
             match config.MODEL:
                 case "Style":
-                    gen_fake = disc(fake,alpha,step)
-                case "Pro":
-                    gen_fake = disc(fake)
+                    fake = gen(w, noise)
+                    critic_fake = critic(fake.detach())
+    
+                    critic_real = critic(real)
+                    gp = gradient_penalty(critic, real, fake)
+                    loss_critic = (
+                        -(torch.mean(critic_real) - torch.mean(critic_fake))
+                        + config.LAMBDA_GP * gp
+                        + (0.001 * torch.mean(critic_real ** 2))
+                    )
 
-            loss_gen = -torch.nanmean(gen_fake)
-            
-            
-            scaler_gen.scale(loss_gen).backward()
-            scaler_gen.step(opt_gen)
-            scaler_gen.update()
+                case "Wavelet":
+                    fake = gen(w, noise)
+                    critic_fake = critic(fake.detach())
+    
+                    critic_real = critic(real)
+                    gp = gradient_penalty(critic, real, fake)
+                    loss_critic = (
+                        -(torch.mean(critic_real) - torch.mean(critic_fake))
+                        + config.LAMBDA_GP * gp
+                        + (0.001 * torch.mean(critic_real ** 2))
+                    )
+
+        critic.zero_grad(set_to_none=True)
+        scaler_critic.scale(loss_critic).backward()
+        scaler_critic.step(opt_critic)
+        scaler_critic.update()
+
+        gen_fake = critic(fake)
+        loss_gen = -torch.mean(gen_fake)
+
+        with torch.cuda.amp.autocast(dtype=torch.float32):
+            if batch_idx % 16 == 0:
+                plp = path_length_penalty(w, fake)
+                if not torch.isnan(plp):
+                    loss_gen = loss_gen + plp
+                    loop.set_postfix(plp=plp.detach(),refresh=False)
+                    
+            if config.FID:
+                if batch_idx % 28 == 0:
+                    FID_Score = calculate_fid(real,fake,fid)
+                    if not torch.isnan(FID_Score):
+                        loss_gen = loss_gen + FID_Score
+                        loop.set_postfix(FID=FID_Score.detach(),refresh=False)
+
+
+        map.zero_grad(set_to_none=True)
+        gen.zero_grad(set_to_none=True)
+        scaler_gen.scale(loss_gen).backward()
+        scaler_gen.step(opt_gen)
+        scaler_gen.update()
+        opt_map.step()
+        # Zera os gradientes
         
-        alpha += cur_batch_size / ((len(dataset) * config.PROGRESSIVE_EPOCHS[step]*0.20))
-        alpha = min(alpha, 1)
 
-        match config.MODEL:
-            case "Pro":
-                gen.set_alpha(alpha)
-                disc.set_alpha(alpha)
+        loop.set_postfix(gp=gp.detach(), loss_critic=loss_critic.detach(),refresh=False)
 
-        if batch_idx  % 50 == 0 and config.TENSORBOARD:    
+        if torch.isnan(gp) or torch.isnan(loss_critic) :
+            exit("Gradientes explodiram!")
+
+        
+        if batch_idx  % 20 == 0 and config.TENSORBOARD:    
             with torch.no_grad(): # Plotar no tensorboard
                 match config.MODEL:
                     case "Style":
-                        fixed_fakes = gen(config.FIXED_NOISE, alpha, step) * 0.5 + 0.5
-                    case "Pro":
-                        fixed_fakes = gen(config.FIXED_NOISE) * 0.5 + 0.5
+                        fixed_fakes = gen(get_w(config.FIXED_BATCH_SIZE,map),get_noise(config.FIXED_BATCH_SIZE)) * 0.5 + 0.5
 
-                plot_thread = Thread(target=plot_to_tensorboard, args=(writer, loss_disc.detach(), loss_gen.detach(), real.detach(), fixed_fakes.detach(), tensorboard_step, now, gen, disc, gp,), daemon=True)
+                plot_thread = Thread(target=plot_to_tensorboard, args=(writer, loss_critic.detach(), loss_gen.detach(), real.detach(), fixed_fakes.detach(), tensorboard_step, now, gen, critic, gp,), daemon=True)
                 plot_thread.start()
             tensorboard_step += 1
 
-    if config.FID:
-        FID_Score = calculate_fid(real,fake,fid).item()
+        
+
+        
+    
             
     if config.SCHEDULER:
         scheduler_gen.step()
@@ -192,12 +197,11 @@ def train_fn(
 
 
     if config.OPTMIZER == "SWA":
-        opt_disc.swap_swa_sgd()
+        opt_critic.swap_swa_sgd()
         opt_gen.swap_swa_sgd()
 
     
-    
-    print(f"Gradient Penalty: {gp.detach()}\tAlpha: {alpha}\nScheduler: {scheduler_gen.get_lr()[0]}")
+        
     return tensorboard_step, alpha
 
 def main():
@@ -208,58 +212,68 @@ def main():
     tensorboard_step = 0
     match config.MODEL:
         case "Style":
-            gen = StyleGenerator(config.Z_DIM, config.W_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
-            disc = StyleDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
-        case "Pro":
-            gen = Generator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
-            disc = Discriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True,memory_format = mem_format)
+            gen = WaveGenerator(log_resolution=config.SIMULATED_STEP,W_DIM=config.W_DIM,n_features=32).to(device=config.DEVICE, non_blocking=True, memory_format = mem_format)
+            disc = Discriminator(log_resolution=config.SIMULATED_STEP).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
+            map = MappingNetwork(config.Z_DIM,config.W_DIM).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
+            path_length_penalty = PathLengthPenalty(0.99).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
+
         case "Wavelet":
-            gen = WaveGenerator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True, memory_format = mem_format)
-            disc = WaveDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(config.DEVICE, non_blocking=True,memory_format = mem_format)
+            gen = WaveGenerator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(device=config.DEVICE, non_blocking=True, memory_format = mem_format)
+            disc = WaveDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
           
     if config.CREATE_MODEL_GRAPH:
-        plot_cnns_tensorboard()
+        w = get_w(1,map)
+        plot_cnns_tensorboard(gen,disc, get_noise(1), w)
 
     fid = ""
     if config.FID:
-        fid = FrechetInceptionDistance().cuda()
+        fid = FrechetInceptionDistance().to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
 
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:
         case "RMSPROP":
             opt_gen = optim.RMSprop(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, weight_decay=config.WEIGHT_DECAY, foreach=True,momentum=0.5)
             opt_disc = optim.RMSprop(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY, foreach=True, momentum=0.5)
+            opt_map = optim.RMSprop(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, weight_decay=config.WEIGHT_DECAY, foreach=True, momentum=0.5)
         case "ADAM":
             opt_gen = optim.Adam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER,weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.Adam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER,weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.Adam(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER,weight_decay=config.WEIGHT_DECAY)
         case "NADAM":
             opt_gen = optim.NAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.NAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.NAdam(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "ADAMAX":
             opt_gen = optim.Adamax(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.Adamax(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.Adamax(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "ADAMW": 
             # https://www.fast.ai/posts/2018-07-02-adam-weight-decay.html
             # https://openreview.net/forum?id=ryQu7f-RZ&noteId=B1PDZUChG
             opt_gen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.AdamW(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "ADAGRAD":
             opt_gen = optim.Adagrad(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.Adagrad(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.Adagrad(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case "SGD":
             opt_gen = optim.SGD(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR,momentum=0.9, nesterov=True, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.SGD(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,momentum=0.9, nesterov=True, weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.SGD(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR,momentum=0.9, nesterov=True, weight_decay=config.WEIGHT_DECAY)
         case "SAM": #https://github.com/davda54/sam https://github.com/mosaicml/composer/tree/dev/composer/algorithms/sam
-            #opt_gen = optim.AdamW
-            #opt_disc = optim.AdamW
+            
             #opt_gen = sam.SAM(gen.parameters(),opt_gen, lr=config.LEARNING_RATE_GENERATOR, momentum=0.9, weight_decay=config.WEIGHT_DECAY)
             #opt_disc = sam.SAM(disc.parameters(),opt_gen, lr=config.LEARNING_RATE_GENERATOR, momentum=0.9, weight_decay=config.WEIGHT_DECAY)
+            #opt_map = sam.SAM(map.parameters(),opt_gen, lr=config.LEARNING_RATE_GENERATOR, momentum=0.9, weight_decay=config.WEIGHT_DECAY)
             raise NotImplementedError("Sam is not implemented")
         case "SWA":
             baseGen = optim.AdamW(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.5,0.99),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             baseDisc = optim.AdamW(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            baseMap = optim.AdamW(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.5,0.99),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_gen = SWA(baseGen,swa_start=10,swa_freq=5,swa_lr=0.05)
             opt_disc = SWA(baseDisc,swa_start=10,swa_freq=5,swa_lr=0.05)
+            opt_map = SWA(baseMap,swa_start=10,swa_freq=5,swa_lr=0.05)
         case "ADAMW8":
             if os.name == 'nt':
                 raise NotImplementedError("ADAMW8 do not work on Windows")
@@ -269,6 +283,7 @@ def main():
         case "RADAM":
             opt_gen = optim.RAdam(gen.parameters(), lr=config.LEARNING_RATE_GENERATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
             opt_disc = optim.RAdam(disc.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
+            opt_map = optim.RAdam(map.parameters(), lr=config.LEARNING_RATE_DISCRIMINATOR, betas=(0.9,0.999),eps=config.SPECIAL_NUMBER, weight_decay=config.WEIGHT_DECAY)
         case _:
             raise NotImplementedError(f"Optim function not implemented")
 
@@ -286,9 +301,11 @@ def main():
         T_mult=config.SCHEDULER_MULT,
         eta_min=config.MIN_LEARNING_RATE, 
         )
+    
 
     scaler_disc = torch.cuda.amp.GradScaler()
     scaler_gen = torch.cuda.amp.GradScaler()
+    scaler_map = torch.cuda.amp.GradScaler()
 
     if config.LOAD_MODEL:
         aux = f"{config.WHERE_LOAD}"
@@ -309,7 +326,9 @@ def main():
         load_checkpoint(
             config.CHECKPOINT_CRITIC, disc, opt_disc, epoch_s, step_s, schedulerDisc, config.WHERE_LOAD
         )
-        
+        load_checkpoint(
+            config.CHECKPOINT_MAP, map, opt_map, epoch_s, step_s, dataset= config.WHERE_LOAD
+        )
         for i in range(step, step_s[0]):
             tensorboard_step += config.PROGRESSIVE_EPOCHS[i]
 
@@ -319,12 +338,14 @@ def main():
         schedulerGen.last_epoch, schedulerDisc.last_epoch = cur_epoch
 
 
-    images_saw = 0
-    
-
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
-        loader, dataset = get_loader(4*2**step)
+        match config.MODEL:
+            case "Style":
+                loader, dataset = get_loader(2**config.SIMULATED_STEP)
+            case "Pro":
+                loader, dataset = get_loader(4*2**step)
+
         img_size = 4*2**step
         
         match config.MODEL:
@@ -337,29 +358,34 @@ def main():
         for epoch in range(cur_epoch,num_epochs):
             gen.train()
             disc.train()
-            print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{img_size} - Batch size:{config.BATCH_SIZES[step]}")
+            map.train()
+            match config.MODEL:
+                case "Style":
+                    print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{2**config.SIMULATED_STEP} - Batch size:{config.BATCH_SIZES[config.SIMULATED_STEP]}")
+                case _:
+                    print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{img_size} - Batch size:{config.BATCH_SIZES[step]}")
             tensorboard_step, alpha = train_fn(
                 disc,
                 gen,
+                map,
+                path_length_penalty,
                 loader,
                 dataset,
                 step,
                 alpha,
                 opt_disc,
                 opt_gen,
+                opt_map,
                 tensorboard_step,
                 writer,
                 scaler_gen,
                 scaler_disc,
+                scaler_map,
                 schedulerGen,
                 schedulerDisc,
                 now,
                 fid
             )
-
-
-            images_saw = images_saw + config.BATCH_SIZES[step] * len(loader)
-            print(f"Images saw: {images_saw}")
 
             if config.LOAD_MODEL:
                 data_save_path = config.WHERE_LOAD
@@ -367,7 +393,7 @@ def main():
                 data_save_path = config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss") + "_" + config.OPTMIZER
 
             if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1) and config.GENERATE_IMAGES:
-                img_generator = Thread(target=generate_examples, args=( gen, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), data_save_path,), daemon=True)
+                img_generator = Thread(target=generate_examples, args=( gen, map, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), data_save_path,), daemon=True)
                 try:
                     img_generator.start()
                     img_generator.join()
@@ -377,11 +403,14 @@ def main():
             if config.SAVE_MODEL:
                 gen_check = Thread(target=save_checkpoint, args=(gen, opt_gen, schedulerGen, epoch, step, config.CHECKPOINT_GEN, data_save_path,), daemon=True)
                 critic_check = Thread(target=save_checkpoint, args=(disc, opt_disc, schedulerDisc, epoch, step, config.CHECKPOINT_CRITIC, data_save_path,), daemon=True)
+                map_check = Thread(target=save_checkpoint, args=(map, opt_map, None, epoch, step, config.CHECKPOINT_MAP, data_save_path,), daemon=True)
                 try:
                     gen_check.start()
                     critic_check.start()
+                    map_check.start()
                     gen_check.join()
                     critic_check.join()
+                    map_check.join()
                 except Exception as err:
                     print(f"Erro: {err}")
 
@@ -390,7 +419,12 @@ def main():
             for module_name, module in gen.named_modules():
                 if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
                     module.require_grad = False
-
+            for module_name, module in disc.named_modules():
+                if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
+                    module.require_grad = False
+            for module_name, module in map.named_modules():
+                if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
+                    module.require_grad = False
         step += 1
         cur_epoch = 0
 
@@ -400,14 +434,14 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.set_float32_matmul_precision('medium')
     torch.autograd.set_detect_anomaly(False)
     torch.autograd.emit_nvtx = False
-    torch.set_num_threads(2)
+    torch.set_num_threads(6)
     torch.use_deterministic_algorithms(True, warn_only=True)
-
+    torch.set_default_dtype(torch.float32)
     with keepawake(keep_screen_awake=False):
         warnings.filterwarnings("ignore")
         path = config.FOLDER_PATH

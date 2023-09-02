@@ -64,3 +64,7 @@ https://arxiv.org/pdf/1710.10196.pdf
 https://arxiv.org/pdf/1904.03189.pdf
 https://ieeexplore.ieee.org/document/8721631
 https://torchmetrics.readthedocs.io/en/stable/image/kernel_inception_distance.html
+Wavelet Loss
+https://arxiv.org/pdf/2209.02316.pdf
+
+OLHAR MSG-GAN
