@@ -18,19 +18,22 @@ from utils import (
     save_checkpoint,
     load_checkpoint,
     generate_examples,
+    draw_model_graph,
     plot_cnns_tensorboard,
     remove_graphs,
-    calculate_fid
+    calculate_fid,
+    calculate_psnr,
+    calculate_ssim,
+    calculate_ms_ssim
 )
-from model import Discriminator, Generator, MappingNetwork, get_noise, get_w, PathLengthPenalty, WaveDiscriminator, WaveGenerator
+from model import Discriminator, Generator, MappingNetwork, get_noise, get_w, PathLengthPenalty, WaveDiscriminator, WaveGenerator, RGBuvHistBlock
 from math import log2
 from tqdm import tqdm
 import config
 import warnings
 from torchcontrib.optim import SWA
-from torchmetrics.image.fid import FrechetInceptionDistance
 from pytorch_wavelets import DWTForward, DWTInverse
-
+import numpy as np
 
 mem_format = torch.channels_last if config.CHANNEL_LAST == True else torch.contiguous_format
 
@@ -46,25 +49,22 @@ def load_tensor(x):
         x.to(torch.float32)
         return x
 
-def get_loader(image_size):
+def get_loader():
     """
     Retorna um Loader e Um Dataset
 
     image_size: Dimensão das imagens que vão ser lidas do dataset
     """
-    batch_size = config.BATCH_SIZES[int(log2(image_size / 4))]
+    batch_size = config.BATCH_SIZES[config.SIMULATED_STEP]
     
-    dataset = datasets.DatasetFolder(root=f"Datasets/{config.DATASET}_aug/{image_size}x{image_size}",loader=load_tensor,extensions=['.pt'])
+    dataset = datasets.DatasetFolder(root=f"Datasets/{config.DATASET}_aug/{2**config.SIMULATED_STEP}x{2**config.SIMULATED_STEP}",loader=load_tensor,extensions=['.pt'])
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=True, # True
-        num_workers=config.NUM_WORKERS,
         pin_memory=True,
         drop_last=False,
-        prefetch_factor=16,
-        persistent_workers=True,
-        multiprocessing_context='spawn',
+        
     )
     return loader, dataset
 
@@ -73,6 +73,7 @@ def train_fn(
     gen,
     map,
     path_length_penalty,
+    histo_loss,
     loader,
     dataset,
     step,
@@ -88,11 +89,10 @@ def train_fn(
     scheduler_gen,
     scheduler_disc,
     now,
-    fid
     ):
     # TODO: Como nao eh mais progressive epochs, devemos arrumar na Main o loop de treinamento
 
-    loop = tqdm(loader, leave=True, unit_scale=True, smoothing=1.0, colour="cyan", ncols=200, desc="Batch training")
+    loop = tqdm(loader, leave=True, unit_scale=True, smoothing=0.3, colour="cyan", ncols=160, desc="Training", nrows= 2, disable= not config.PROGRESS_BAR)
     loss_gen = 0
     for batch_idx, (real, _) in enumerate(loop):
         # imagens por segundo batch_size * it
@@ -111,14 +111,13 @@ def train_fn(
 
         w     = get_w(cur_batch_size, map)
         noise = get_noise(cur_batch_size)
-        with torch.cuda.amp.autocast(dtype=torch.float32):
+        with torch.cuda.amp.autocast(dtype=config.PRECISION_TYPE):
             #https://paperswithcode.com/method/wgan-gp#:~:text=weight%20clipping%20parameter%20.-,A%20Gradient%20Penalty%20is%20a%20soft%20version%20of%20the%20Lipschitz,used%20as%20the%20gradient%20penalty.
             match config.MODEL:
                 case "Style":
                     fake = gen(w, noise)
                     critic_fake = critic(fake.detach())
-    
-                    critic_real = critic(real)
+                    critic_real = critic(real)        
                     gp = gradient_penalty(critic, real, fake)
                     loss_critic = (
                         -(torch.mean(critic_real) - torch.mean(critic_fake))
@@ -146,19 +145,33 @@ def train_fn(
         gen_fake = critic(fake)
         loss_gen = -torch.mean(gen_fake)
 
-        with torch.cuda.amp.autocast(dtype=torch.float32):
-            if batch_idx % 16 == 0:
-                plp = path_length_penalty(w, fake)
-                if not torch.isnan(plp):
-                    loss_gen = loss_gen + plp
-                    loop.set_postfix(plp=plp.detach(),refresh=False)
-                    
+        with torch.cuda.amp.autocast(dtype=config.PRECISION_TYPE):
+            if config.HISTOLOSS:
+                input_hist = histo_loss(fake)
+                target_hist = histo_loss(real)
+                histogram_loss = (1/np.sqrt(2.0) * (torch.sqrt(torch.sum(torch.pow(torch.sqrt(target_hist) - torch.sqrt(input_hist), 2)))) / input_hist.shape[0])
+                loss_gen = loss_gen + (histogram_loss * config.LAMBDA_HISTO)
+
+            if config.PLP:   
+                if batch_idx % 24 == 0:
+                    plp = path_length_penalty(w, fake)
+                    if not torch.isnan(plp):
+                        loss_gen = loss_gen + plp
+                        loop.set_postfix(plp=plp.item(),refresh=True)
+
             if config.FID:
-                if batch_idx % 28 == 0:
-                    FID_Score = calculate_fid(real,fake,fid)
+                if batch_idx % 40 == 0:
+                    FID_Score = calculate_fid(real,fake,now)
                     if not torch.isnan(FID_Score):
                         loss_gen = loss_gen + FID_Score
-                        loop.set_postfix(FID=FID_Score.detach(),refresh=False)
+                        loop.set_postfix(FID=FID_Score.item(),refresh=True)
+            if config.SSIM:
+                loss_gen = loss_gen + calculate_ssim(real,fake,now)
+            if config.PSNR:
+                loss_gen = loss_gen + (calculate_psnr(real,fake,now))
+            if config.MS_SSIM:
+                loss_gen = loss_gen + (calculate_ms_ssim(real,fake,now))
+
 
 
         map.zero_grad(set_to_none=True)
@@ -170,7 +183,7 @@ def train_fn(
         # Zera os gradientes
         
 
-        loop.set_postfix(gp=gp.detach(), loss_critic=loss_critic.detach(),refresh=False)
+        loop.set_postfix(gp=gp.detach(),critic=loss_critic.detach(),refresh=True)
 
         if torch.isnan(gp) or torch.isnan(loss_critic) :
             exit("Gradientes explodiram!")
@@ -187,9 +200,6 @@ def train_fn(
             tensorboard_step += 1
 
         
-
-        
-    
             
     if config.SCHEDULER:
         scheduler_gen.step()
@@ -212,23 +222,16 @@ def main():
     tensorboard_step = 0
     match config.MODEL:
         case "Style":
-            gen = WaveGenerator(log_resolution=config.SIMULATED_STEP,W_DIM=config.W_DIM,n_features=32).to(device=config.DEVICE, non_blocking=True, memory_format = mem_format)
-            disc = Discriminator(log_resolution=config.SIMULATED_STEP).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
+            gen = WaveGenerator(log_resolution=config.SIMULATED_STEP,W_DIM=config.W_DIM,n_features=128).to(device=config.DEVICE, non_blocking=True, memory_format = mem_format)
+            disc = WaveDiscriminator(log_resolution=config.SIMULATED_STEP).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
             map = MappingNetwork(config.Z_DIM,config.W_DIM).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
             path_length_penalty = PathLengthPenalty(0.99).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
+            histo_loss = RGBuvHistBlock().to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
 
         case "Wavelet":
             gen = WaveGenerator(config.Z_DIM, config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(device=config.DEVICE, non_blocking=True, memory_format = mem_format)
             disc = WaveDiscriminator(config.IN_CHANNELS, img_channels=config.CHANNELS_IMG).to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
           
-    if config.CREATE_MODEL_GRAPH:
-        w = get_w(1,map)
-        plot_cnns_tensorboard(gen,disc, get_noise(1), w)
-
-    fid = ""
-    if config.FID:
-        fid = FrechetInceptionDistance().to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
-
     #Initialize optmizer and scalers for FP16 Training
     match config.OPTMIZER:
         case "RMSPROP":
@@ -287,7 +290,19 @@ def main():
         case _:
             raise NotImplementedError(f"Optim function not implemented")
 
+    if config.LOAD_MODEL:
+        data_save_path = config.WHERE_LOAD
+    else:
+        data_save_path = config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss") + "_" + config.OPTMIZER
 
+    if config.CREATE_MODEL_GRAPH:
+        try:
+            draw_model_graph(data_save_path,map,gen,disc)
+            print("Graphs Created Successfully")
+        except:
+            print("Graphs could not be created successfully")
+        
+        
     # optim.lr_scheduler.CoassineWarmRestarts
     schedulerGen = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         opt_gen,
@@ -337,16 +352,14 @@ def main():
         tensorboard_step += cur_epoch
         schedulerGen.last_epoch, schedulerDisc.last_epoch = cur_epoch
 
-
     for num_epochs in config.PROGRESSIVE_EPOCHS[step:]:
         alpha = 1e-5
         match config.MODEL:
             case "Style":
-                loader, dataset = get_loader(2**config.SIMULATED_STEP)
+                loader, dataset = get_loader()
             case "Pro":
-                loader, dataset = get_loader(4*2**step)
+                loader, dataset = get_loader() # Deprecated
 
-        img_size = 4*2**step
         
         match config.MODEL:
             case "Pro":
@@ -361,14 +374,15 @@ def main():
             map.train()
             match config.MODEL:
                 case "Style":
-                    print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{2**config.SIMULATED_STEP} - Batch size:{config.BATCH_SIZES[config.SIMULATED_STEP]}")
+                    print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{2**(config.SIMULATED_STEP)} - Batch size:{config.BATCH_SIZES[config.SIMULATED_STEP]}")
                 case _:
-                    print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{img_size} - Batch size:{config.BATCH_SIZES[step]}")
+                    print(f"Epoch [{epoch}/{num_epochs}] - Tamanho:{4*2**(step)} - Batch size:{config.BATCH_SIZES[step]}")
             tensorboard_step, alpha = train_fn(
                 disc,
                 gen,
                 map,
                 path_length_penalty,
+                histo_loss,
                 loader,
                 dataset,
                 step,
@@ -384,16 +398,12 @@ def main():
                 schedulerGen,
                 schedulerDisc,
                 now,
-                fid
             )
 
-            if config.LOAD_MODEL:
-                data_save_path = config.WHERE_LOAD
-            else:
-                data_save_path = config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss") + "_" + config.OPTMIZER
+            
 
             if config.GENERATE_IMAGES and (epoch%config.GENERATED_EPOCH_DISTANCE == 0) or epoch == (num_epochs-1) and config.GENERATE_IMAGES:
-                img_generator = Thread(target=generate_examples, args=( gen, map, step, config.N_TO_GENERATE, (epoch-1), (4*2**step), data_save_path,), daemon=True)
+                img_generator = Thread(target=generate_examples, args=( gen, map, step, config.N_TO_GENERATE, (epoch-1), (2**config.SIMULATED_STEP), data_save_path, disc,), daemon=True)
                 try:
                     img_generator.start()
                     img_generator.join()
@@ -414,17 +424,6 @@ def main():
                 except Exception as err:
                     print(f"Erro: {err}")
 
-        "requires_grad = false em todas camadas que já treinou"
-        if config.PAUSE_LAYERS:
-            for module_name, module in gen.named_modules():
-                if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
-                    module.require_grad = False
-            for module_name, module in disc.named_modules():
-                if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
-                    module.require_grad = False
-            for module_name, module in map.named_modules():
-                if f"prog_blocks.{step}" in module_name or f"rgb_layers.{step}" in module_name:
-                    module.require_grad = False
         step += 1
         cur_epoch = 0
 
@@ -436,12 +435,11 @@ if __name__ == "__main__":
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.set_float32_matmul_precision('medium')
+    torch.set_float32_matmul_precision('high')
     torch.autograd.set_detect_anomaly(False)
     torch.autograd.emit_nvtx = False
     torch.set_num_threads(6)
     torch.use_deterministic_algorithms(True, warn_only=True)
-    torch.set_default_dtype(torch.float32)
     with keepawake(keep_screen_awake=False):
         warnings.filterwarnings("ignore")
         path = config.FOLDER_PATH

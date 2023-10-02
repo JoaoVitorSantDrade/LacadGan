@@ -1,5 +1,5 @@
-# ProGan
- Implementação de uma Progressive GAN
+# SwaGan
+Implementação de uma Progressive GAN/Style GAN/SwaGAN
 
 Feitos:
 Salvamento da Model
@@ -35,18 +35,22 @@ Resolvido problema com o datasetAugmentation.py - (FEITO - 19/04/2023)
 
  Como treinar uma GAN com dataset de tamanho limitado? - Feito
  StyleGAN funciona p/ gerar glomérulos diferentes?
-
+    Sim
+    Olhar Condional GAN, tem que usar Labels
  To Do:
  
- Gradient Acumulation - Não funcionou (18/04/2023)
- Gradient Checkpointing
- Implementação de Feature Matching
- Implementar Feature learning (Fazer a GAN diferenciar entre os tipos de imagem gerada)
- Implementação de Multi Scale Gradient - Paper
+OLHAR MSG-GAN (Implementado)
 
+Utilizar Peak Signal-to-Noise Ratio (PSNR) nas imagens em escala de cinza, assim, melhorando a Luminance
+   Motivo:
+      Olho humano é mais sucetível a variações da Luminance
 
-Observações:
-Quanto maior o learning rate, maiores são as features que ele captura. Irei testar com um learning rate muito baixo e mais épocas, assim talvez ele consiga pegar as features menores das células
+Utilizar Structural Similarity Index (https://github.com/VainF/pytorch-msssim)
+
+Passar a utlilizar Loss providas pelo Torch Metrics
+
+Implementação de Multi Scale Gradient - Paper
+
 
 https://www.casualganpapers.com/page/6/
 https://github.com/LACAD/gan-amiloisose.git
@@ -66,5 +70,9 @@ https://ieeexplore.ieee.org/document/8721631
 https://torchmetrics.readthedocs.io/en/stable/image/kernel_inception_distance.html
 Wavelet Loss
 https://arxiv.org/pdf/2209.02316.pdf
-
-OLHAR MSG-GAN
+Relativistic GAN no lugar da Wesserstein GAN
+FairGAN : Fairness-aware Generative Adversarial Networks
+Melhorar a velocidade do Dataloader do Pytorch
+Fiz mudanças na lowlevel.py (Biblioteca p/ PyWavelet), agora treino com BF16 e F16 são possíveis
+O path "Pro" que levaria para uma versão ProGan da rede foi depreciado em relação a StyleGan/Wavelet
+https://www.youtube.com/watch?v=SuDtHqtC5OE&ab_channel=DigitalSreeni

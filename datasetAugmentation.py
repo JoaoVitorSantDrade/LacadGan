@@ -83,15 +83,22 @@ if __name__ == "__main__":
 
         img_size = 4*2**step
         loop_master = tqdm(range(num_multiply), position=0, ncols=100,colour='blue', desc=f"{img_size}x{img_size}")
+        loader, _ = get_loader(img_size)
+        
         for k, _ in enumerate(loop_master):
             pathlib.Path(full_path + f"/{img_size}x{img_size}/tensors_{k}").mkdir(parents=True, exist_ok=True)
-            loader, _ = get_loader(img_size)
             loop = tqdm(loader, position=1, ncols=100, colour="Cyan", desc=f"Loop {k+1}", leave=False)
+            tensor_batch = []
             for i, tensor in enumerate(loop):
                 tensorGPU = tensor[0].to(config.DEVICE)
                 tensorGPU = transformation(tensorGPU)
                 for j in range(tensorGPU.shape[0]):
-                    if IMAGE:
-                        save_image(tensorGPU[j].clone(), f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors_{k}/image{i + j + (i)*batchsize}.jpg")
-                    else:
-                        torch.save(tensorGPU[j].clone(), f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors_{k}/tensor{i + j + (i)*batchsize}.pt")
+                    tensor_batch.append(tensorGPU[j].clone())
+
+            for idx,tensor in enumerate(tensor_batch):
+                if IMAGE:
+                    save_image(tensor_batch[idx], f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors_{k}/image{i + idx + (i)*batchsize}.jpg")
+                else:
+                    torch.save(tensor_batch[idx], f"Datasets/{config.DATASET}_aug/{img_size}x{img_size}/tensors_{k}/tensor{i + idx + (i)*batchsize}.pt")
+
+                        

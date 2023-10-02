@@ -8,29 +8,78 @@ import pathlib
 from torchvision.utils import save_image
 from scipy.stats import truncnorm
 from torch.utils.tensorboard import SummaryWriter
-from datetime import datetime
 from model import get_w, get_noise
 import shutil
+from torchmetrics.image import PeakSignalNoiseRatio, MultiScaleStructuralSimilarityIndexMeasure, StructuralSimilarityIndexMeasure,FrechetInceptionDistance
+import asyncio
 from math import log2
+import torchviz as tvz
+from torchview import draw_graph
 
+mem_format = torch.channels_last if config.CHANNEL_LAST == True else torch.contiguous_format
 
+if config.MS_SSIM:
+    ms_ssim = MultiScaleStructuralSimilarityIndexMeasure().to(config.DEVICE,non_blocking=True,memory_format = mem_format)
 
-def calculate_fid(true_images,false_images, fid):
+if config.SSIM:
+    ssim = StructuralSimilarityIndexMeasure().to(config.DEVICE,non_blocking=True,memory_format = mem_format)
+
+if config.PSNR:
+    psnr = PeakSignalNoiseRatio().to(config.DEVICE,non_blocking=True,memory_format = mem_format)
+
+if config.FID:
+    fid = FrechetInceptionDistance().to(device=config.DEVICE, non_blocking=True,memory_format = mem_format)
+
+def write_to_save_path(filename,item,now, unit = ""):
+    try:
+        with open(f'saves/{config.DATASET + "_" + now.strftime("%d-%m-%Y-%Hh%Mm%Ss") + "_" + config.OPTMIZER}/{filename}.txt','a') as f:
+            f.write(f"{filename}: {item} {unit}\n")
+    except:
+        pathlib.Path(config.FOLDER_PATH + "/saves/" + config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss")  + "_" + config.OPTMIZER + "/").mkdir(parents=True, exist_ok=True)
+        with open(f'saves/{config.DATASET + "_"+ now.strftime("%d-%m-%Y-%Hh%Mm%Ss") + "_" + config.OPTMIZER}/{filename}.txt','a') as f:
+            f.write(f"{filename}: {item} {unit}\n")
+
+def calculate_mifid(true_images,false_images,now):
+    #https://arxiv.org/pdf/2106.03062.pdf
+    pass
+
+def calculate_psnr(true_images,false_images,now):
+    #Quanto maior, melhor
+    grey_scale = torchvision.transforms.Grayscale()
+    psnr_score = psnr(grey_scale(true_images),grey_scale(false_images))
+    write_to_save_path("psnr_score",(psnr_score.detach()),now,unit="DBs")
+    return 1 / torch.log10(psnr_score)
+
+def calculate_ssim(true_images,false_images,now):
+    grey_scale = torchvision.transforms.Grayscale()
+    #https://arxiv.org/pdf/2006.13846.pdf
+    #https://repositorio.ufes.br/handle/10/9659
+
+    ssim_score = ssim(grey_scale(false_images), grey_scale(true_images))
+    write_to_save_path("ssim_score",ssim_score.detach(),now)
+    return log2(2 - ssim_score)
+
+def calculate_ms_ssim(true_images,false_images,now):
+    #https://torchmetrics.readthedocs.io/en/stable/image/multi_scale_structural_similarity.html
+    
+    grey_scale = torchvision.transforms.Grayscale()
+    ms_ssim_score = ms_ssim(grey_scale(false_images), grey_scale(true_images))
+    write_to_save_path("ms_ssim_score",ms_ssim_score.detach(),now)
+    return log2(2 - ms_ssim_score) 
+
+def calculate_fid(true_images,false_images, now):
     true_images = true_images.to(torch.uint8)
     false_images = false_images.to(torch.uint8)
 
     fid.update(true_images,True)
     fid.update(false_images,False)
     fid_score = fid.compute()
-
-    with open('fid_score.txt','a') as f:
-        f.write(f"FID: {fid_score.item()}\n")
-
+    write_to_save_path("fid_score",fid_score.detach(),now)
     return fid_score
 
 # Print losses occasionally and print to tensorboard
 def plot_to_tensorboard(
-    writer:SummaryWriter, loss_critic, loss_gen, real, fake, tensorboard_step, now:datetime, gen, critic, gp
+    writer:SummaryWriter, loss_critic, loss_gen, real, fake, tensorboard_step, now, gen, critic, gp
 ):
     # precision = true_p/(true_p+false_p+config.SPECIAL_NUMBER)
     # recall = true_p/(true_p+false_n+config.SPECIAL_NUMBER)
@@ -48,8 +97,8 @@ def plot_to_tensorboard(
     #         writer.add_histogram(f"critic/{name}",param.data,global_step=tensorboard_step)
 
     with torch.no_grad():
-        img_grid_real = torchvision.utils.make_grid(real[:8], normalize=True)
-        img_grid_fake = torchvision.utils.make_grid(fake[:8], normalize=True)
+        img_grid_real = torchvision.utils.make_grid(real[:8])
+        img_grid_fake = torchvision.utils.make_grid(fake[:8])
         if config.LOAD_MODEL:
             aux = f"{config.WHERE_LOAD}"
             aux = aux.replace(f"{config.DATASET}_","")
@@ -157,15 +206,14 @@ def seed_everything(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
-def generate_examples(gen, mapping_network, steps, n=1000,epoch=0,size=0,name="default"):
+def generate_examples(gen, mapping_network, steps, n=1000,epoch=0,size=0,name="default", critic = None):
     truncation = 0.7
     caminho = config.FOLDER_PATH + "/saves/" + name
     if size < 10:
         parent_dir = caminho + "/size_0"+ str(size) +"/"
     else:
         parent_dir = caminho + "/size_"+ str(size) +"/"
-        
+    
     if os.path.isdir(parent_dir) == False:
         pathlib.Path(parent_dir).mkdir(parents=True, exist_ok=True)
         
@@ -198,9 +246,40 @@ def generate_examples(gen, mapping_network, steps, n=1000,epoch=0,size=0,name="d
                     img = gen(noise)
 
             save_image(img*0.5+0.5, f"{parent_dir}epoch_{epoch+1}/img_{i}.jpeg")
-
-    gen.train()
     return
+
+def draw_model_graph(name,map,gen,critic=None):
+        w     = get_w(1, map)
+        noise = get_noise(1)
+        img = gen(w, noise)
+
+        parent_dir = config.FOLDER_PATH + "/saves/" + name
+        if os.path.isdir(parent_dir) == False:
+            pathlib.Path(parent_dir).mkdir(parents=True, exist_ok=True)
+
+        torchview = draw_graph(
+            model=gen,
+            input_data=(w,noise),
+            directory=parent_dir,
+            roll=True,
+            expand_nested=True,
+            )
+        torchview.visual_graph.render(f"Gen",format="png",directory=parent_dir)
+
+        if critic:
+            torchview = draw_graph(
+            model=critic,
+            input_data=img,
+            directory=parent_dir,
+            roll=True,
+            expand_nested=True,
+            )
+            torchview.visual_graph.render(f"Critic",format="png",directory=parent_dir)
+        
+        
+def generate_graph(model, *model_input, path_to_save, name=None):
+    dots = tvz.make_dot(model(model_input), params=dict(model.named_parameters()), show_attrs=True, show_saved=True)
+    dots.render(f"{name}_Graph", format="png",directory=path_to_save)
 
 def show_loaded_model():
     model = torch.load(str(pathlib.Path().resolve()) + "/saves/" + config.DATASET +"/"+ config.CHECKPOINT_CRITIC)
