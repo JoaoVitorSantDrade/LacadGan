@@ -5,15 +5,15 @@ from math import log2
 import torch
 import pathlib
 
-START_TRAIN_AT_IMG_SIZE = 128
+START_TRAIN_AT_IMG_SIZE = 128 # Tamanho que geramos de imagem StyleGan/WaveletGan
 DATASET = 'hypertrain' # Nome do dataset
 CHECKPOINT_GEN = "generator.pth"  # Nome do checkpoint
 CHECKPOINT_CRITIC = "critic.pth" # Nome do checkpoint
 CHECKPOINT_MAP = "map.pth" # Nome do checkpoint
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else "cpu" # Nome do Device
-PRECISION_TYPE = torch.float32
-TENSORBOARD = True
-PROGRESS_BAR = False
+PRECISION_TYPE = torch.float32 # Tipo de precisao que usamos no Autocast
+TENSORBOARD = True # Se queremos utilizar o tensorboard para acompanhar a evolucao do treino
+PROGRESS_BAR = False # Se queremos a barra de progresso do TQDM
 SAVE_MODEL = True # Salvar modelo
 LOAD_MODEL = False # Carregar modelo
 WHERE_LOAD = "Folder in ./Saves" # Onde carregar o modelo
@@ -43,8 +43,8 @@ OPTMIZER = "ADAMW" # ADAM / NADAM / RMSPROP / ADAMAX / ADAMW / ADAMW8 / ADAGRAD 
 SCHEDULER = True # Utilizar LearningRate Scheduler e Não pode MODEL = Style
 SCHEDULER_MULT = 1 # Multplier que utilizamos para separar cada "iteracao" do scheduler. ! Somente Ints !
 MODEL = "Style" # Style, Pro, Wavelet
-CHANNEL_LAST = False
-CREATE_MODEL_GRAPH = True
+CHANNEL_LAST = False # No lugar das matrizes serem B C H W , elas serão B H W C. Aumento de desempenho, mas não testado para todas as bibliotecas/implementações
+CREATE_MODEL_GRAPH = True # Se queremos que um grafo do modelo seja criado.
 SPECIAL_NUMBER = 1e-5 # Evitar divisao por zero
 CRITIC_TREAINING_STEPS = 1 # A cada quantos steps treinar o critic
 ACCUM_ITERATIONS = 1 # Gradient acumulation - Quantas epochs acumular por gradient antes de fazer o backpropagation
@@ -55,4 +55,4 @@ PSNR = True
 SSIM = True
 MS_SSIM = False
 HISTOLOSS = True
-LAMBDA_HISTO = 5
+LAMBDA_HISTO = 5 #Valor para o multiplicado do Histoloss
